@@ -5,7 +5,11 @@ import {
   buildLaps, kmBounds, summarize, planFromDetection, fmtDur, fmtPace,
 } from './engine.js';
 import { buildFit, DEVICES, resolveDevice } from './export.js';
-import { TEMPLATES, STEP_TYPES, clonePlan, flattenPlan, planRecords, step, repeat, uid, withIds, stepDur } from './plan.js';
+import { TEMPLATES, STEP_TYPES, clonePlan, flattenPlan, planRecords, step, repeat, uid, withIds, stepDur, typeLabel } from './plan.js';
+import { lapGroups, setGroupDuration, setGroupName, setGroupType, intervalShape, setRepCount, shiftSet, snapToChanges, durations } from './laps.js';
+
+export const VERSION = '2.0';
+const DESK = document.body.dataset.layout === 'desktop';
 
 // ------------------------------------------------------------------ utils
 const $ = s => document.querySelector(s);
@@ -14,7 +18,7 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem('runsync.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem('runsync.' + k, JSON.stringify(v)); } catch { /* storage unavailable */ } },
 };
-const km = m => (Math.round(m / 10) / 100).toFixed(2);
+const km = m => (Math.round(m / 10 + 1e-6) / 100).toFixed(2);
 const kmh = v => (v * 3.6).toFixed(1);
 const spm = c => (c ? Math.round(c * 2) : '–');
 const fmtClock = t => new Date(t).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
@@ -119,6 +123,7 @@ function applyLaps(res) {
   }
   res.laps = buildLaps(res.records, bounds, { calories: res.calories });
   res.lapMode = S.lapMode;
+  if (S.lapMode === 'custom') S.custom = res.laps.map(l => ({ t: l.start, type: l.type, name: l.name, trigger: l.trigger }));
 }
 
 function recompute() { compute(); render(); }
@@ -126,9 +131,10 @@ function recompute() { compute(); render(); }
 // ------------------------------------------------------------------ charts
 function down(arr, max = 900) { const k = Math.max(1, Math.ceil(arr.length / max)); return k === 1 ? arr : arr.filter((_, i) => i % k === 0 || i === arr.length - 1); }
 
-function profileChart(recs, laps, { hr = true, h = 190 } = {}) {
+let CHARTS = {}, chartSeq = 0;
+function profileChart(recs, laps, { hr = true, h = DESK ? 250 : 190 } = {}) {
   if (!recs?.length) return '';
-  const W = 720, H = h, hasHr = hr && recs.some(r => r.hr > 0);
+  const W = DESK ? 1100 : 720, H = h, hasHr = hr && recs.some(r => r.hr > 0);
   const pl = 30, pr = hasHr ? 32 : 10, pt = 10, pb = 22;
   const t0 = recs[0].t, t1 = recs[recs.length - 1].t || t0 + 1;
   const X = t => pl + (t - t0) / ((t1 - t0) || 1) * (W - pl - pr);
@@ -163,13 +169,15 @@ function profileChart(recs, laps, { hr = true, h = 190 } = {}) {
     hrLine = `<polyline fill="none" style="stroke:var(--ink)" stroke-opacity=".75" stroke-width="1.4" stroke-linejoin="round" points="${pts.map(r => `${X(r.t).toFixed(1)},${YH(r.hr).toFixed(1)}`).join(' ')}"/>`;
     for (let v = lo; v <= hi; v += (hi - lo > 60 ? 20 : 10)) hrLine += `<text x="${W - pr + 5}" y="${YH(v) + 4}">${v}</text>`;
   }
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Speed profile${hasHr ? ' with heart rate' : ''}">${g}${areas}${hrLine}</svg>`;
+  const cid = `c${++chartSeq}`;
+  CHARTS[cid] = { recs, laps, t0, t1, pl, pr, W, X };
+  return `<div class="chartwrap" data-cid="${cid}"><svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Speed profile${hasHr ? ' with heart rate' : ''}">${g}${areas}${hrLine}<line class="cur hide" x1="0" x2="0" y1="${pt}" y2="${H - pb}"/></svg><div class="tip hide"></div></div>`;
 }
 
 function alignChart(watch, source, offsetMs, zoom) {
   const recs = watch.records;
   if (!recs.length || !source?.samples.length) return '';
-  const W = 720, H = 140, pl = 8, pr = 8, pt = 8, pb = 20;
+  const W = DESK ? 1000 : 720, H = DESK ? 170 : 140, pl = 8, pr = 8, pt = 8, pb = 20;
   let x0 = recs[0].t, x1 = recs[recs.length - 1].t;
   if (zoom === 'start') x1 = Math.min(x1, x0 + 16 * 60e3);
   if (zoom === 'end') x0 = Math.max(x0, x1 - 16 * 60e3);
@@ -208,7 +216,7 @@ function lapTable(laps, { hr = true, edit = false, total = null, kind = 'run' } 
       ? `<div class="editname"><select class="inp sm" data-ch="lap-type" data-k="${k}">${typeOpts(l.type)}</select><input class="inp sm" id="lapn-${k}" data-ch="lap-name" data-k="${k}" value="${esc(l.name)}"></div>`
       : `<div class="lapname"><span class="dot"></span><span class="ln">${esc(l.name || `Lap ${k + 1}`)}</span></div>`;
     const time = edit && k < laps.length - 1
-      ? `<input class="inp sm num" id="lapd-${k}" data-ch="lap-dur" data-k="${k}" value="${fmtDur(l.duration)}" style="width:76px" inputmode="numeric">`
+      ? `<input class="inp sm num" id="lapd-${k}" data-ch="lap-dur" data-k="${k}" value="${fmtDur(l.duration)}" style="width:76px">`
       : fmtDur(l.duration);
     return `<tr class="t-${l.type}"><td class="idx">${k + 1}</td><td>${name}</td><td class="n">${time}</td><td class="n">${km(l.distance)}</td>
       <td class="pacebar"><div class="bar" style="width:${w}%"><span>${fmtPace(l.avgSpeed)}</span></div></td>
@@ -247,10 +255,8 @@ function tile(which) {
   </div>`;
 }
 
-function viewSync() {
-  let h = '';
-  // ---- 1. files
-  h += `<section class="card"><h2><span class="step">1</span>Your run</h2><div class="stack">${tile('watch')}
+function cardFiles() {
+  let h = `<section class="card"><h2><span class="step">1</span>Your run</h2><div class="stack">${tile('watch')}
     <div><div class="small muted" style="margin-bottom:6px;font-weight:600">Where should the speed come from?</div>
     <div class="seg full" role="group">${[['file', 'Treadmill file'], ['plan', 'Manual / plan'], ['watch', 'Watch only']].map(([v, l]) => `<button data-act="srcmode" data-v="${v}" aria-pressed="${S.srcMode === v}">${l}</button>`).join('')}</div></div>`;
   if (S.srcMode === 'file') h += tile('qz');
@@ -260,59 +266,89 @@ function viewSync() {
       <div class="row" style="margin-top:8px"><select class="inp sm" data-ch="tpl-pick" style="width:auto;max-width:100%"><option value="">Load a template…</option>${TEMPLATES.map((t, i) => `<option value="t${i}">${esc(t.name)}</option>`).join('')}${S.saved.map((t, i) => `<option value="s${i}">★ ${esc(t.name)}</option>`).join('')}</select>
       <button class="btn sm" data-act="tab" data-tab="plan">Edit plan</button></div></div>`;
   } else h += `<div class="note">Uses the watch’s own pace pattern, scaled so the total matches the actual distance you enter below. Best when you have no treadmill log and no plan.</div>`;
-  h += `</div></section>`;
+  return h + `</div></section>`;
+}
 
-  if (!S.watch) {
-    h += `<section class="card empty"><p><b>Start with your watch file.</b><br>Then add the QZ treadmill file, or enter the speeds by hand. Nothing is uploaded — files are processed on this device.</p></section>`;
-    return h;
-  }
-  const src = currentSource();
+function cardEmpty() {
+  return DESK
+    ? `<section class="card empty bigdrop" data-drop="watch"><div class="ico">${ICON.watch}${ICON.tread}</div><p><b>Drop your watch file and treadmill file here — both at once is fine.</b><br>RunSync recognises which is which. Or use the boxes on the left.</p><p class="small muted">Shortcuts: ← / → nudge alignment (Shift = 10 s) · E edit laps · Ctrl/⌘ + S save FIT · 1 / 2 / 3 switch tabs</p></section>`
+    : `<section class="card empty"><p><b>Start with your watch file.</b><br>Then add the QZ treadmill file, or enter the speeds by hand. Nothing is uploaded — files are processed on this device.</p><p class="small muted">Tip: choose both files at once and RunSync will sort them out.</p></section>`;
+}
 
-  // ---- 2. alignment
-  if (src && S.srcMode !== 'watch') {
-    const isPlan = S.srcMode === 'plan';
-    const off = isPlan ? 0 : S.offset;
-    const chk = !isPlan ? alignmentCheck(S.watch, src, S.offset) : alignmentCheck(S.watch, src, 0);
-    h += `<section class="card"><h2><span class="step">2</span>Line up the two</h2><div class="stack">
-      <div class="offset">
-        <button class="btn sm" data-act="nudge" data-v="-10">−10</button><button class="btn sm" data-act="nudge" data-v="-1">−1</button>
-        <div class="val">${(isPlan ? S.planOffset : S.offset) > 0 ? '+' : ''}${isPlan ? S.planOffset : S.offset}<small class="muted" style="font-size:14px"> s</small></div>
-        <button class="btn sm" data-act="nudge" data-v="1">+1</button><button class="btn sm" data-act="nudge" data-v="10">+10</button>
-        <button class="btn sm dark" data-act="auto-align">Auto</button>
-      </div>
-      <div class="small muted">${isPlan ? 'Seconds after the watch started that the plan’s first step began.' : 'Seconds added to the treadmill clock so its speed changes line up with the watch.'}</div>
-      ${!isPlan && S.align ? `<div class="note ${S.align.method === 'timestamps' || S.align.method === 'laps' ? 'ok' : 'warn'}">${esc(S.align.note)}${chk ? ` Watch laps sit <b>${chk.median > 0 ? '+' : ''}${chk.median.toFixed(0)} s</b> from the nearest speed change (${chk.matched}/${chk.laps} matched).` : ''}</div>` : ''}
-      ${isPlan && chk ? `<div class="note">Watch laps sit <b>${chk.median > 0 ? '+' : ''}${chk.median.toFixed(0)} s</b> from the nearest plan step change (${chk.matched}/${chk.laps} matched).</div>` : ''}
-      <div class="row between"><span class="small muted">Check where the orange line steps against the watch trace.</span>
-        <div class="seg">${[['start', 'Start'], ['full', 'Full'], ['end', 'End']].map(([v, l]) => `<button data-act="zoom" data-v="${v}" aria-pressed="${S.alignZoom === v}">${l}</button>`).join('')}</div></div>
-      ${alignChart(S.watch, src, off * 1000, S.alignZoom)}
-      <div class="small muted">The watch’s own cadence and pace react 10–20 s late, so a small lag on the grey line is normal.</div>
-    </div></section>`;
-  }
+function cardAlign(src) {
+  const isPlan = S.srcMode === 'plan';
+  const off = isPlan ? 0 : S.offset;
+  const chk = alignmentCheck(S.watch, src, isPlan ? 0 : S.offset);
+  const val = isPlan ? S.planOffset : S.offset;
+  return `<section class="card"><h2><span class="step">2</span>Line up the two</h2><div class="stack">
+    <div class="offset">
+      <button class="btn sm" data-act="nudge" data-v="-10">−10</button><button class="btn sm" data-act="nudge" data-v="-1">−1</button>
+      <div class="val">${val > 0 ? '+' : ''}${val}<small class="muted" style="font-size:14px"> s</small></div>
+      <button class="btn sm" data-act="nudge" data-v="1">+1</button><button class="btn sm" data-act="nudge" data-v="10">+10</button>
+      <button class="btn sm dark" data-act="auto-align">Auto</button>
+    </div>
+    <div class="small muted">${isPlan ? 'Seconds after the watch started that the plan’s first step began.' : 'Seconds added to the treadmill clock so its speed changes line up with the watch.'}${DESK ? ' Keyboard: ← / → (Shift = 10 s).' : ''}</div>
+    ${!isPlan && S.align ? `<div class="note ${S.align.method === 'timestamps' || S.align.method === 'laps' ? 'ok' : 'warn'}">${esc(S.align.note)}${chk ? ` Watch laps sit <b>${chk.median > 0 ? '+' : ''}${chk.median.toFixed(0)} s</b> from the nearest speed change (${chk.matched}/${chk.laps} matched).` : ''}</div>` : ''}
+    ${isPlan && chk ? `<div class="note">Watch laps sit <b>${chk.median > 0 ? '+' : ''}${chk.median.toFixed(0)} s</b> from the nearest plan step change (${chk.matched}/${chk.laps} matched).</div>` : ''}
+    <div class="row between"><span class="small muted">Check where the orange line steps against the watch trace.</span>
+      <div class="seg">${[['start', 'Start'], ['full', 'Full'], ['end', 'End']].map(([v, l]) => `<button data-act="zoom" data-v="${v}" aria-pressed="${S.alignZoom === v}">${l}</button>`).join('')}</div></div>
+    ${alignChart(S.watch, src, off * 1000, S.alignZoom)}
+    <div class="small muted">The watch’s own cadence and pace react 10–20 s late, so a small lag on the grey line is normal.</div>
+  </div></section>`;
+}
 
-  // ---- 3. settings
-  if (src) {
-    const qzDist = S.qz?.records?.at(-1)?.dist;
-    const chips = [];
-    if (S.watch.session?.distance) chips.push([S.watch.session.distance, 'watch summary']);
-    if (S.srcMode === 'file' && qzDist) chips.push([qzDist, 'treadmill']);
-    h += `<section class="card"><h2><span class="step">3</span>Distance &amp; clean-up</h2><div class="grid2">
-      <div><label class="field"><span>Actual distance</span><div class="unit"><input class="inp num" id="target" data-ch="target" inputmode="decimal" placeholder="e.g. 12.20" value="${esc(S.targetKm)}"><em>km</em></div></label>
-        ${chips.length ? `<div class="chips">${chips.map(([d, l]) => `<button class="chip" data-act="settarget" data-v="${(d / 1000).toFixed(2)}">${(d / 1000).toFixed(2)} · ${l}</button>`).join('')}${S.targetKm ? '<button class="chip" data-act="settarget" data-v="">clear</button>' : ''}</div>` : ''}
-        <div class="small muted" style="margin-top:6px">${S.srcMode === 'watch' ? 'Required in watch-only mode.' : 'Optional. The last lap is extended or cut so the run ends exactly here — nothing else changes.'}</div></div>
-      <div class="stack">
-        ${S.srcMode !== 'plan' ? `<label class="field"><span>Ignore startup speed below</span><div class="unit"><input class="inp num" id="minsp" data-ch="minspeed" inputmode="decimal" value="${settings.minSpeed}"><em>km/h</em></div></label>` : ''}
-        ${S.srcMode !== 'watch' ? `<label class="field"><span>How to reach the actual distance</span><select class="inp" data-ch="distmode"><option value="extend"${settings.distMode === 'extend' ? ' selected' : ''}>Extend / trim the end (recommended)</option><option value="scale"${settings.distMode === 'scale' ? ' selected' : ''}>Scale every speed proportionally</option></select></label>` : ''}
-        <label class="switch"><input type="checkbox" data-ch="recalc"${settings.recalc ? ' checked' : ''}><span><span class="t">Recalculate step length</span><br><span class="d">Step length &amp; vertical ratio from treadmill speed ÷ cadence.</span></span></label>
-      </div></div></section>`;
-  }
+function cardSettings() {
+  const qzDist = S.qz?.records?.at(-1)?.dist;
+  const chips = [];
+  if (S.watch.session?.distance) chips.push([S.watch.session.distance, 'watch summary']);
+  if (S.srcMode === 'file' && qzDist) chips.push([qzDist, 'treadmill']);
+  return `<section class="card"><h2><span class="step">3</span>Distance &amp; clean-up</h2><div class="grid2">
+    <div><label class="field"><span>Actual distance</span><div class="unit"><input class="inp num" id="target" data-ch="target" placeholder="e.g. 12.20" value="${esc(S.targetKm)}" autocomplete="off"><em>km</em></div></label>
+      ${chips.length ? `<div class="chips">${chips.map(([d, l]) => `<button class="chip" data-act="settarget" data-v="${(d / 1000).toFixed(2)}">${(d / 1000).toFixed(2)} · ${l}</button>`).join('')}${S.targetKm ? '<button class="chip" data-act="settarget" data-v="">clear</button>' : ''}</div>` : ''}
+      <div class="small muted" style="margin-top:6px">${S.srcMode === 'watch' ? 'Required in watch-only mode.' : 'Optional. The last lap is extended or cut so the run ends exactly here — nothing else changes.'}</div></div>
+    <div class="stack">
+      ${S.srcMode !== 'plan' ? `<label class="field"><span>Ignore startup speed below</span><div class="unit"><input class="inp num" id="minsp" data-ch="minspeed" value="${settings.minSpeed}" autocomplete="off"><em>km/h</em></div></label>` : ''}
+      ${S.srcMode !== 'watch' ? `<label class="field"><span>How to reach the actual distance</span><select class="inp" data-ch="distmode"><option value="extend"${settings.distMode === 'extend' ? ' selected' : ''}>Extend / trim the end (recommended)</option><option value="scale"${settings.distMode === 'scale' ? ' selected' : ''}>Scale every speed proportionally</option></select></label>` : ''}
+      <label class="switch"><input type="checkbox" data-ch="recalc"${settings.recalc ? ' checked' : ''}><span><span class="t">Recalculate step length</span><br><span class="d">Step length &amp; vertical ratio from treadmill speed ÷ cadence.</span></span></label>
+    </div></div></section>`;
+}
 
-  if (S.error) h += `<section class="card note warn">${esc(S.error)}</section>`;
-  if (!S.result) return h;
+const GROUP_LABEL = { warmup: 'Warm up', active: 'Reps / runs', rest: 'Recoveries', cooldown: 'Cool down' };
 
-  // ---- 4. result
-  const r = S.result, sm = r.summary, info = r.info;
-  const notes = [];
+function setEditor(r) {
+  const bounds = S.custom && S.lapMode === 'custom' ? S.custom : r.laps.map(l => ({ t: l.start, type: l.type, name: l.name }));
+  const end = r.records[r.records.length - 1].t;
+  const groups = lapGroups(bounds, end);
+  const shape = intervalShape(bounds);
+  const durs = durations(bounds, end);
+  const typeOpts = t => STEP_TYPES.map(o => `<option value="${o.id}"${o.id === t ? ' selected' : ''}>${o.label}</option>`).join('');
+  const rows = groups.map(g => `<div class="se-row t-${g.type}">
+      <div class="se-name"><span class="dot"></span><b>${GROUP_LABEL[g.type] || typeLabel(g.type)}</b><span class="muted"> × ${g.count}</span></div>
+      <label class="se-f"><span>Each lasts</span>${g.lastOnly
+        ? `<input class="inp sm num" value="to the end" disabled>`
+        : `<input class="inp sm num" id="se-dur-${g.type}" data-ch="se-dur" data-type="${g.type}" value="${fmtDur(g.dur)}" autocomplete="off">`}
+        ${!g.uniform ? `<em class="mixed" title="Laps of this kind have different lengths; typing here makes them all equal">mixed</em>` : ''}</label>
+      <label class="se-f"><span>Name</span><input class="inp sm" id="se-name-${g.type}" data-ch="se-name" data-type="${g.type}" value="${esc(g.pattern)}" placeholder="${g.count > 1 ? 'e.g. Rep #' : 'Name'}" autocomplete="off"></label>
+      <label class="se-f"><span>Type</span><select class="inp sm" data-ch="se-type" data-type="${g.type}">${typeOpts(g.type)}</select></label>
+    </div>`).join('');
+  const med = ks => { const v = ks.map(k => durs[k]).sort((a, b) => a - b); return v[v.length >> 1]; };
+  const repTxt = shape ? `${shape.reps.length} × ${fmtDur(med(shape.reps))}${shape.recs.length ? ` / ${fmtDur(med(shape.recs))}` : ''}` : '';
+  return `<div class="seteditor">
+    <div class="se-head"><div><b>Edit as a set</b> <span class="small muted">— one box changes every lap of that kind</span></div>
+      ${shape ? `<label class="se-count">Reps <input class="inp sm num" id="se-count" data-ch="se-count" value="${shape.reps.length}" autocomplete="off"><span class="small muted">${repTxt}</span></label>` : ''}</div>
+    ${rows}
+    <div class="row se-tools">
+      <span class="small muted">Move all boundaries</span>
+      <button class="btn sm" data-act="se-shift" data-v="-1">−1 s</button><button class="btn sm" data-act="se-shift" data-v="1">+1 s</button>
+      <button class="btn sm" data-act="se-snap" title="Move each lap boundary onto the nearest speed change (±12 s)">Snap to speed changes</button>
+      <button class="btn sm ghost" data-act="lap-reset">Reset to auto-detected</button>
+    </div>
+    <div class="small muted">Changing a length moves the laps after it; the last lap (usually the cool down) takes up the difference. Use “#” in a name for the lap number, e.g. “Rep #”. Fine-tune single laps in the table below.</div>
+  </div>`;
+}
+
+function resultNotes(r) {
+  const info = r.info, notes = [];
   if (info.trimmedStartSec > 0) notes.push(`Starts at ${fmtTime(r.records[0].t)} — removed the first ${fmtDur(info.trimmedStartSec)} ${S.srcMode === 'plan' ? 'before the plan begins' : `(watch running before the intended ${info.startSpeed ? kmh(info.startSpeed) + ' km/h' : 'speed'} was set)`}.`);
   if (info.droppedEnd > 0) notes.push(`Dropped ${fmtDur(info.droppedEnd)} of watch data after the ${S.srcMode === 'plan' ? 'plan' : 'treadmill'} stopped.`);
   if (info.held > 0) notes.push(`${S.srcMode === 'plan' ? 'Plan' : 'Treadmill file'} ended early — held the last speed for ${fmtDur(info.held)} of watch data.`);
@@ -320,41 +356,65 @@ function viewSync() {
   if (info.truncated > 0) notes.push(`Cut the last ${fmtDur(info.truncated)} — the run reached ${km(info.finalDist)} km before the recording ended.`);
   if (info.scale !== 1) notes.push(`Scaled every speed by ×${info.scale.toFixed(4)} (${km(info.rawDist)} → ${km(info.finalDist)} km).`);
   if (!notes.length) notes.push(`Distance from ${S.srcMode === 'plan' ? 'the plan' : 'treadmill speed'}: ${km(info.finalDist)} km.`);
-  const view = S.view;
+  return notes;
+}
+
+function lapControls() {
+  return `<div class="row" style="gap:6px">
+    <select class="inp sm" data-ch="lapmode" style="width:auto">${[['auto', 'Auto-detected'], ['km', 'Every N km'], ['watch', 'Watch’s laps'], ['single', 'One lap'], ['custom', 'Custom (edited)']].map(([v, l]) => `<option value="${v}"${S.lapMode === v ? ' selected' : ''}${v === 'custom' && !S.custom ? ' disabled' : ''}>${l}</option>`).join('')}</select>
+    ${S.lapMode === 'km' ? `<div class="unit" style="width:96px"><input class="inp sm num" id="lapkm" data-ch="lapkm" value="${settings.lapKm}" autocomplete="off"><em>km</em></div>` : ''}
+    <button class="btn sm ${S.editing ? 'primary' : ''}" data-act="edit">${S.editing ? 'Done' : 'Edit laps'}</button>
+  </div>`;
+}
+
+function cardResult() {
+  const r = S.result, sm = r.summary;
+  const view = DESK && !S.editing ? 'laps' : S.view;
   const lapsShown = view === 'km' ? r.km : r.laps;
-  h += `<section class="card"><h2><span class="step">4</span>Result<span class="grow"></span></h2><div class="stack">
-    <div class="row between"><span class="badge"><span class="k">Detected</span>${esc(r.det.label)}</span></div>
-    <div class="stats">
+  const editing = S.editing && view === 'laps';
+  const stats = `<div class="stats">
       <div class="stat"><div class="l">Distance</div><div class="v">${km(sm.distance)}<small>km</small></div></div>
       <div class="stat"><div class="l">Time</div><div class="v">${fmtDur(sm.duration)}</div></div>
       <div class="stat"><div class="l">Avg pace</div><div class="v">${fmtPace(sm.avgSpeed)}<small>/km</small></div></div>
       <div class="stat"><div class="l">Avg HR</div><div class="v">${sm.avgHr ?? '–'}<small>bpm</small></div></div>
       <div class="stat"><div class="l">Cadence</div><div class="v">${spm(sm.avgCad)}<small>spm</small></div></div>
       <div class="stat"><div class="l">${sm.calories != null ? 'Calories' : 'Max HR'}</div><div class="v">${sm.calories ?? sm.maxHr ?? '–'}<small>${sm.calories != null ? 'kcal' : 'bpm'}</small></div></div>
+    </div>`;
+  const legend = `<div class="legend"><span><i style="background:var(--wu)"></i>Warm up</span><span><i style="background:var(--work)"></i>Run / rep</span><span><i style="background:var(--rest)"></i>Recovery</span><span><i style="background:var(--cd)"></i>Cool down</span><span><i style="background:var(--ink)"></i>Heart rate</span><span class="muted">${DESK ? 'Hover' : 'Touch'} the chart for details</span></div>`;
+  let tables;
+  if (DESK && !S.editing) {
+    tables = `<div class="tables2">
+      <div><div class="row between tbl-h"><h3>Laps <span class="muted">(${r.laps.length})</span></h3>${lapControls()}</div>${lapTable(r.laps, { hr: true, total: sm })}</div>
+      <div><div class="row between tbl-h"><h3>Km splits <span class="muted">(${r.km.length})</span></h3></div>${lapTable(r.km, { hr: true, total: sm })}</div>
+    </div>`;
+  } else {
+    tables = `<div class="row between">
+      ${DESK ? `<h3 style="margin:0">Laps <span class="muted">(${r.laps.length})</span></h3>` : `<div class="seg">${[['laps', `Laps (${r.laps.length})`], ['km', `Km splits (${r.km.length})`]].map(([v, l]) => `<button data-act="view" data-v="${v}" aria-pressed="${view === v}">${l}</button>`).join('')}</div>`}
+      ${view === 'laps' ? lapControls() : ''}
     </div>
-    <ul class="notes">${notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>
+    ${editing ? setEditor(r) : ''}
+    ${editing ? '<div class="small muted" style="font-weight:600">One lap at a time</div>' : ''}
+    ${lapTable(lapsShown, { hr: true, edit: editing, total: sm })}
+    ${editing ? `<div class="small muted">Change a lap’s time to move its end. Split halves a lap; merge joins it with the next.</div>` : ''}`;
+  }
+  return `<section class="card"><h2><span class="step">4</span>Result<span class="grow"></span></h2><div class="stack">
+    <div class="row between"><span class="badge"><span class="k">Detected</span>${esc(r.det.label)}</span>${DESK ? '' : ''}</div>
+    ${stats}
+    <ul class="notes">${resultNotes(r).map(n => `<li>${esc(n)}</li>`).join('')}</ul>
     ${profileChart(r.records, view === 'km' ? r.km : r.laps)}
-    <div class="legend"><span><i style="background:var(--wu)"></i>Warm up</span><span><i style="background:var(--work)"></i>Run / rep</span><span><i style="background:var(--rest)"></i>Recovery</span><span><i style="background:var(--cd)"></i>Cool down</span><span><i style="background:var(--ink)"></i>Heart rate</span></div>
-    <div class="row between">
-      <div class="seg">${[['laps', `Laps (${r.laps.length})`], ['km', `Km splits (${r.km.length})`]].map(([v, l]) => `<button data-act="view" data-v="${v}" aria-pressed="${view === v}">${l}</button>`).join('')}</div>
-      ${view === 'laps' ? `<div class="row" style="gap:6px">
-        <select class="inp sm" data-ch="lapmode" style="width:auto">${[['auto', 'Auto-detected'], ['km', 'Every N km'], ['watch', 'Watch’s laps'], ['single', 'One lap'], ['custom', 'Custom (edited)']].map(([v, l]) => `<option value="${v}"${S.lapMode === v ? ' selected' : ''}${v === 'custom' && !S.custom ? ' disabled' : ''}>${l}</option>`).join('')}</select>
-        ${S.lapMode === 'km' ? `<div class="unit" style="width:96px"><input class="inp sm num" id="lapkm" data-ch="lapkm" inputmode="decimal" value="${settings.lapKm}"><em>km</em></div>` : ''}
-        <button class="btn sm ${S.editing ? 'primary' : ''}" data-act="edit">${S.editing ? 'Done' : 'Edit laps'}</button>
-      </div>` : ''}
-    </div>
-    ${lapTable(lapsShown, { hr: true, edit: S.editing && view === 'laps', total: sm })}
-    ${S.editing && view === 'laps' ? `<div class="row"><span class="small muted">Change a lap’s time to move its end. Split ✂ halves a lap; merge joins it with the next.</span><button class="btn sm" data-act="lap-reset">Reset to auto-detected</button></div>` : ''}
+    ${legend}
+    ${tables}
     <div class="row"><button class="btn sm" data-act="to-plan">Save this workout as a plan</button></div>
   </div></section>`;
+}
 
-  // ---- 5. export
+function cardExport() {
   const dev = resolveDevice(settings.device, S.watch);
   const canShare = typeof navigator !== 'undefined' && navigator.canShare && navigator.canShare({ files: [new File([new Uint8Array(1)], 'x.fit', { type: 'application/octet-stream' })] });
-  h += `<section class="card"><h2><span class="step">5</span>Export</h2><div class="stack">
+  return `<section class="card"><h2><span class="step">5</span>Export</h2><div class="stack">
     <div class="grid2">
       <label class="field"><span>Device to show in the file</span><select class="inp" data-ch="device">${DEVICES.map(d => `<option value="${d.id}"${d.id === settings.device ? ' selected' : ''}>${esc(d.name)}</option>`).join('')}</select></label>
-      <label class="field"><span>File name</span><input class="inp" id="fname" data-ch="fname" value="${esc(S.fileBase)}"></label>
+      <label class="field"><span>File name</span><input class="inp" id="fname" data-ch="fname" value="${esc(S.fileBase)}" autocomplete="off"></label>
     </div>
     <div class="row">
       <button class="btn primary" data-act="export" data-fmt="fit">${ICON.dl} FIT</button>
@@ -364,9 +424,25 @@ function viewSync() {
       <button class="btn" data-act="export" data-fmt="lapcsv">${ICON.dl} Laps CSV</button>
       ${canShare ? `<button class="btn dark" data-act="share">${ICON.share} Share FIT</button>` : ''}
     </div>
-    <div class="small muted">FIT keeps everything from the watch file (HR, running dynamics, training effect, developer fields) with treadmill speed, distance and new laps. Device: <b>${esc(dev.name)}</b>. GPX has no field for distance without GPS, so it uses a virtual straight track as long as the run.</div>
+    <div class="small muted">FIT keeps everything from the watch file (HR, running dynamics, training effect, developer fields) with treadmill speed, distance and new laps. Device: <b>${esc(dev.name)}</b>.${DESK ? ' Ctrl/⌘ + S saves the FIT.' : ''} GPX has no field for distance without GPS, so it uses a virtual straight track as long as the run.</div>
   </div></section>`;
-  return h;
+}
+
+function viewSync() {
+  const wideHint = !DESK && window.innerWidth >= 1100 ? `<div class="note deskhint">On a computer? <a href="desktop.html">Open the desktop version</a> — side-by-side layout, both tables at once, keyboard shortcuts.</div>` : '';
+  const files = cardFiles();
+  if (!S.watch) return DESK ? `<div class="dsk"><aside class="side">${files}</aside><section class="mainpane">${cardEmpty()}</section></div>` : wideHint + files + cardEmpty();
+  const src = currentSource();
+  const align = src && S.srcMode !== 'watch' ? cardAlign(src) : '';
+  const sets = src ? cardSettings() : '';
+  const err = S.error ? `<section class="card note warn">${esc(S.error)}</section>` : '';
+  const res = S.result ? cardResult() : '';
+  const exp = S.result ? cardExport() : '';
+  if (DESK) {
+    const waiting = !S.result && !S.error ? `<section class="card empty bigdrop" data-drop="qz"><p><b>${S.srcMode === 'file' ? 'Now add the treadmill (QZ) file.' : 'Set the plan or distance on the left.'}</b></p></section>` : '';
+    return `<div class="dsk"><aside class="side">${files}${align}${sets}${exp}</aside><section class="mainpane">${err}${res}${waiting}</section></div>`;
+  }
+  return wideHint + files + align + sets + err + res + exp;
 }
 
 // ------------------------------------------------------------------ planner view
@@ -387,9 +463,9 @@ function stepCard(s, inRepeat) {
       </div></div>
     <div class="fields">
       <label><span>Length by</span><select class="inp sm" data-ch="st-durtype" data-id="${s.id}"><option value="time"${s.durType === 'time' ? ' selected' : ''}>Time</option><option value="distance"${s.durType === 'distance' ? ' selected' : ''}>Distance</option>${!inRepeat ? `<option value="open"${s.durType === 'open' ? ' selected' : ''}>Until end</option>` : ''}</select></label>
-      <label><span>${s.durType === 'distance' ? 'Distance (km)' : s.durType === 'open' ? 'Est. time (m:ss)' : 'Time (m:ss)'}</span><input class="inp sm num" id="d-${s.id}" data-ch="st-dur" data-id="${s.id}" value="${esc(durVal)}" inputmode="decimal"></label>
-      <label><span>Speed (km/h)</span><input class="inp sm num" id="k-${s.id}" data-ch="st-kmh" data-id="${s.id}" value="${s.kmh}" inputmode="decimal"></label>
-      <label><span>Pace (/km)</span><input class="inp sm num" id="p-${s.id}" data-ch="st-pace" data-id="${s.id}" value="${pace}" inputmode="decimal"></label>
+      <label><span>${s.durType === 'distance' ? 'Distance (km)' : s.durType === 'open' ? 'Est. time (m:ss)' : 'Time (m:ss)'}</span><input class="inp sm num" id="d-${s.id}" data-ch="st-dur" data-id="${s.id}" value="${esc(durVal)}"></label>
+      <label><span>Speed (km/h)</span><input class="inp sm num" id="k-${s.id}" data-ch="st-kmh" data-id="${s.id}" value="${s.kmh}"></label>
+      <label><span>Pace (/km)</span><input class="inp sm num" id="p-${s.id}" data-ch="st-pace" data-id="${s.id}" value="${pace}"></label>
     </div>
     <div class="meta">${fmtDur(dur)} · ${km(dist)} km${s.durType === 'open' ? ' · fills the rest of the run when syncing' : ''}</div>
   </div>`;
@@ -402,7 +478,7 @@ function viewPlan() {
     if (it.kind === 'repeat') {
       const one = it.steps.reduce((a, s) => a + stepDur(s), 0);
       const oneD = it.steps.reduce((a, s) => a + stepDur(s) * s.kmh / 3.6, 0);
-      items += `<div class="rep"><div class="head"><div class="ttl">${ICON.rep.replace('<svg', '<svg width="16" height="16"')} Repeat <input class="inp sm num" id="rc-${it.id}" data-ch="rep-count" data-id="${it.id}" value="${it.count}" inputmode="numeric"> ×</div>
+      items += `<div class="rep"><div class="head"><div class="ttl">${ICON.rep.replace('<svg', '<svg width="16" height="16"')} Repeat <input class="inp sm num" id="rc-${it.id}" data-ch="rep-count" data-id="${it.id}" value="${it.count}"> ×</div>
         <div class="row" style="gap:4px">
           <button class="btn sm icon ghost" title="Move up" data-act="mv" data-d="-1" data-id="${it.id}">${ICON.up}</button>
           <button class="btn sm icon ghost" title="Move down" data-act="mv" data-d="1" data-id="${it.id}">${ICON.down}</button>
@@ -423,13 +499,13 @@ function viewPlan() {
         <div class="stat"><div class="l">Time</div><div class="v">${fmtDur(sm.duration)}</div></div>
         <div class="stat"><div class="l">Avg pace</div><div class="v">${fmtPace(sm.avgSpeed)}<small>/km</small></div></div>
       </div>
-      ${profileChart(recs, S.planView === 'km' ? kms : laps, { hr: false, h: 160 })}
+      ${profileChart(recs, S.planView === 'km' ? kms : laps, { hr: false, h: DESK ? 300 : 160 })}
       <div class="seg">${[['laps', `Steps (${laps.length})`], ['km', `Km splits (${kms.length})`]].map(([v, l]) => `<button data-act="planview" data-v="${v}" aria-pressed="${S.planView === v}">${l}</button>`).join('')}</div>
       ${lapTable(S.planView === 'km' ? kms : laps, { hr: false, total: sm })}
       ${P.items.some(i => i.durType === 'open') ? '<div class="small muted">“Until end” steps use their estimated time here; when syncing they fill the rest of the watch recording.</div>' : ''}
     </div></section>`;
   }
-  return `<section class="card"><h2>Templates</h2><div class="templates">${TEMPLATES.map((t, i) => `<button class="tpl" data-act="tpl" data-i="${i}">${esc(t.name)}</button>`).join('')}<button class="tpl" data-act="new-plan">+ Blank plan</button></div>
+  const editor = `<section class="card"><h2>Templates</h2><div class="templates">${TEMPLATES.map((t, i) => `<button class="tpl" data-act="tpl" data-i="${i}">${esc(t.name)}</button>`).join('')}<button class="tpl" data-act="new-plan">+ Blank plan</button></div>
     ${S.saved.length ? `<div class="row" style="margin-top:12px"><select class="inp sm" id="savedsel" style="width:auto;flex:1;min-width:160px">${S.saved.map((p, i) => `<option value="${i}">★ ${esc(p.name)}</option>`).join('')}</select><button class="btn sm" data-act="load-saved">Load</button><button class="btn sm ghost" data-act="del-saved">Delete</button></div>` : ''}
   </section>
   <section class="card"><h2>Workout</h2><div class="stack">
@@ -442,7 +518,9 @@ function viewPlan() {
       <button class="btn ghost" data-act="export-plan">Export JSON</button>
       <button class="btn ghost" data-act="import-plan">Import JSON</button>
     </div>
-  </div></section>${summary}`;
+  </div></section>`;
+  if (DESK) return `<div class="dsk dsk-plan"><div>${editor}</div><div class="sticky">${summary || '<section class="card empty">Add steps to see the plan overview.</section>'}</div></div>`;
+  return editor + summary;
 }
 
 function viewHelp() {
@@ -460,12 +538,15 @@ function viewHelp() {
     <li><b>Actual distance:</b> if the treadmill total is short, seconds are added at the end at the last speed. HR and cadence for those seconds are copied from the last few seconds; nothing earlier changes. If it is long, the end is cut where the distance is reached.</li>
     <li><b>Step length:</b> the watch guesses step length from its own (wrong) pace. With this on, step length and vertical ratio are recalculated from treadmill speed ÷ cadence.</li></ul>
     <h3>4 · Laps</h3>
-    <p>RunSync reads the speed profile to work out the session: <b>intervals</b> (warm up · reps · recoveries · cool down), <b>pyramid</b>, <b>fartlek</b>, <b>progression</b>, <b>tempo</b> or an <b>easy / long run</b> (1 km splits). You can switch to N km splits, the watch’s own laps or one lap, or tap <b>Edit laps</b> to retype, rename, move, split and merge laps.</p>
+    <p>RunSync reads the speed profile to work out the session: <b>intervals</b> (warm up · reps · recoveries · cool down), <b>pyramid</b>, <b>fartlek</b>, <b>progression</b>, <b>tempo</b> or an <b>easy / long run</b> (1 km splits). You can switch to N km splits, the watch’s own laps or one lap.</p>
+    <p>Tap <b>Edit laps</b> to change them. <b>Edit as a set</b> changes every lap of one kind at once: type one length for the reps and all 10 reps get it, and later laps move along. You can also change the number of reps, rename them all (“Rep #” numbers them), change their type, shift every boundary by ±1 s, or <b>snap</b> boundaries onto the treadmill’s speed changes. The table underneath still edits one lap at a time.</p>
     <h3>5 · Export</h3>
     <p>FIT is the best option for Strava, Garmin Connect, Intervals.icu, Runalyze and TrainingPeaks. Choose which device the file says it came from (default Amazfit T-Rex 3). On a phone, <b>Share FIT</b> sends it straight to another app.</p>
+    <h3>Desktop version</h3>
+    <p>On a computer, open <a href="desktop.html">desktop.html</a>. Settings sit on the left, results on the right, and laps and km splits show side by side. You can drop both files anywhere at once. Shortcuts: ← / → nudge the alignment (Shift = 10 s), <b>E</b> edits laps, <b>Ctrl/⌘ + S</b> saves the FIT, <b>1 / 2 / 3</b> switch tabs. It installs as a desktop app from Chrome or Edge (install icon in the address bar).</p>
     <h3>Install on your phone</h3>
     <p>Open this page in Chrome (Android) or Safari (iPhone) → menu → <b>Add to Home screen</b>. After the first visit it works offline.</p>
-    <p class="small muted">Your files never leave this device. Plans and settings are saved in this browser only.</p>
+    <p class="small muted">Your files never leave this device. Plans and settings are saved in this browser only. RunSync v${VERSION} · <a href="${DESK ? './' : 'desktop.html'}">${DESK ? 'Mobile' : 'Desktop'} version</a></p>
   </section>`;
 }
 
@@ -475,6 +556,7 @@ function render() {
   const ae = document.activeElement;
   const focusId = ae && ae.id && $('#app').contains(ae) ? ae.id : null;
   const sel = focusId && ae.selectionStart != null ? [ae.selectionStart, ae.selectionEnd] : null;
+  CHARTS = {};
   $('#app').innerHTML = S.tab === 'plan' ? viewPlan() : S.tab === 'help' ? viewHelp() : viewSync();
   if (focusId) {
     const el = document.getElementById(focusId);
@@ -486,28 +568,69 @@ let toastT;
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2600); }
 
 // ------------------------------------------------------------------ files
-async function loadFile(which, file) {
-  if (!file) return;
-  try {
-    const act = await readActivityFile(file);
-    if (!act.records.length) throw new Error('No data records found in this file.');
-    if (which === 'watch') {
-      S.watch = act; S.watchErr = null; S.custom = null; S.editing = false; if (S.lapMode === 'custom') S.lapMode = 'auto';
-      S.fileBase = file.name.replace(/\.[^.]+$/, '') + '_synced';
-    } else {
-      if (!act.records.some(r => r.speed > 0)) throw new Error('No speed data in this file.');
-      S.qz = act; S.qzErr = null; S.custom = null; if (S.lapMode === 'custom') S.lapMode = 'auto';
-    }
-    if (S.watch && S.qz) {
-      const src = currentSource();
-      S.align = S.qz.relativeTime ? { offsetSec: 0, method: 'start', note: 'Treadmill file has elapsed time only — aligned to the watch start.' } : autoAlign(S.watch, src);
-      S.offset = S.align.offsetSec;
-    }
-  } catch (e) {
-    console.error(e);
-    if (which === 'watch') { S.watchErr = `Couldn’t read ${file.name}: ${e.message}`; } else S.qzErr = `Couldn’t read ${file.name}: ${e.message}`;
+function setLoaded(which, act, file) {
+  if (which === 'watch') {
+    S.watch = act; S.watchErr = null;
+    S.fileBase = file.name.replace(/\.[^.]+$/, '') + '_synced';
+  } else {
+    if (!act.records.some(r => r.speed > 0)) throw new Error('No speed data in this file.');
+    S.qz = act; S.qzErr = null; S.srcMode = 'file';
+  }
+  S.custom = null; S.editing = false; if (S.lapMode === 'custom') S.lapMode = 'auto';
+}
+
+function afterLoad() {
+  if (S.watch && S.qz) {
+    S.align = S.qz.relativeTime ? { offsetSec: 0, method: 'start', note: 'Treadmill file has elapsed time only — aligned to the watch start.' } : autoAlign(S.watch, currentSource());
+    S.offset = S.align.offsetSec;
   }
   recompute();
+}
+
+async function parseFile(file) {
+  const act = await readActivityFile(file);
+  if (!act.records.length) throw new Error('No data records found in this file.');
+  return act;
+}
+
+async function loadFile(which, file) {
+  if (!file) return;
+  try { setLoaded(which, await parseFile(file), file); } catch (e) {
+    console.error(e);
+    if (which === 'watch') S.watchErr = `Couldn’t read ${file.name}: ${e.message}`; else S.qzErr = `Couldn’t read ${file.name}: ${e.message}`;
+  }
+  afterLoad();
+}
+
+/** which file is the watch and which the treadmill log? */
+function watchScore(act) {
+  const n = act.records.length || 1;
+  let s = act.records.filter(r => r.hr > 0).length / n * 2 + act.records.filter(r => r.vo > 0 || r.st > 0).length / n;
+  const tag = `${act.name} ${act.device?.productName || ''}`;
+  if (act.device?.manufacturer === 255 || /\bqz\b|qdomyos|zwift|treadmill/i.test(tag)) s -= 3;
+  if (/watch|amazfit|garmin|coros|polar|suunto|zepp|forerunner|fenix/i.test(tag)) s += 1;
+  return s;
+}
+
+async function loadAuto(files) {
+  const parsed = [];
+  for (const f of files.slice(0, 2)) {
+    try { parsed.push({ f, act: await parseFile(f) }); } catch (e) { toast(`Couldn’t read ${f.name}: ${e.message}`); }
+  }
+  if (!parsed.length) return;
+  if (parsed.length === 1) {
+    const { f, act } = parsed[0];
+    const role = !S.watch ? 'watch' : watchScore(act) >= 1 ? 'watch' : 'qz';
+    try { setLoaded(role, act, f); toast(`${f.name} → ${role === 'watch' ? 'watch file' : 'treadmill file'}`); } catch (e) { toast(e.message); }
+  } else {
+    parsed.sort((a, b) => watchScore(b.act) - watchScore(a.act));
+    try {
+      setLoaded('watch', parsed[0].act, parsed[0].f);
+      setLoaded('qz', parsed[1].act, parsed[1].f);
+      toast(`Watch: ${parsed[0].f.name} · Treadmill: ${parsed[1].f.name}`);
+    } catch (e) { toast(e.message); }
+  }
+  afterLoad();
 }
 
 function download(name, data, mime) {
@@ -545,7 +668,20 @@ const deepNew = it => (it.kind === 'repeat' ? { ...it, id: uid(), steps: it.step
 function planChanged() { savePlan(); if (S.srcMode === 'plan' && S.watch) compute(); render(); }
 
 // ------------------------------------------------------------------ events
+function ensureCustom() {
+  if (!S.custom || S.lapMode !== 'custom') { S.custom = S.result.laps.map(l => ({ t: l.start, type: l.type, name: l.name, trigger: l.trigger })); S.lapMode = 'custom'; }
+}
+const endT = () => S.result.records[S.result.records.length - 1].t;
+function setCustom(nb, what) {
+  const before = S.custom.length;
+  S.custom = nb; recompute();
+  if (S.result && S.result.laps.length < before && what !== 'count') toast(`${before - S.result.laps.length} lap(s) no longer fit and were dropped — the run ends sooner.`);
+}
+
 const clickHandlers = {
+  'se-shift': el => { ensureCustom(); setCustom(shiftSet(S.custom, endT(), +el.dataset.v)); },
+  'se-snap': () => { ensureCustom(); const r = snapToChanges(S.custom, S.result.records); setCustom(r.bounds); toast(r.moved ? `Moved ${r.moved} lap boundar${r.moved === 1 ? 'y' : 'ies'} onto speed changes` : 'Laps already sit on the speed changes'); },
+  'open-desktop': () => { location.href = 'desktop.html'; },
   tab: el => { S.tab = el.dataset.tab; render(); window.scrollTo({ top: 0 }); },
   pick: (el, e) => { if (e.target.closest('[data-act="clear"]')) return; $(`#pick-${el.dataset.which === 'watch' ? 'watch' : 'qz'}`).click(); },
   clear: (el, e) => { e.stopPropagation(); if (el.dataset.which === 'watch') { S.watch = null; S.watchErr = null; } else { S.qz = null; S.qzErr = null; S.align = null; } S.custom = null; S.editing = false; recompute(); },
@@ -623,6 +759,10 @@ const clickHandlers = {
 };
 
 const changeHandlers = {
+  'se-dur': el => { const sec = parseDurInput(el.value); if (!(sec > 0)) return render(); ensureCustom(); setCustom(setGroupDuration(S.custom, endT(), el.dataset.type, sec)); },
+  'se-name': el => { ensureCustom(); setCustom(setGroupName(S.custom, el.dataset.type, el.value.trim())); },
+  'se-type': el => { ensureCustom(); setCustom(setGroupType(S.custom, el.dataset.type, el.value)); },
+  'se-count': el => { const n = parseInt(el.value, 10); if (!(n >= 1 && n <= 60)) return render(); ensureCustom(); setCustom(setRepCount(S.custom, endT(), n), 'count'); },
   target: el => { S.targetKm = el.value.trim(); recompute(); },
   minspeed: el => { const v = parseFloat(el.value.replace(',', '.')); if (v >= 0 && v < 20) { settings.minSpeed = v; saveSettings(); } recompute(); },
   distmode: el => { settings.distMode = el.value; saveSettings(); recompute(); },
@@ -674,8 +814,16 @@ document.addEventListener('click', e => {
   if (h) h(el, e);
 });
 document.addEventListener('keydown', e => {
-  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('.tile[data-act="pick"]')) { e.preventDefault(); e.target.click(); }
-  if (e.key === 'Enter' && e.target.matches?.('input[data-ch]')) e.target.blur();
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('.tile[data-act="pick"]')) { e.preventDefault(); e.target.click(); return; }
+  if (e.key === 'Enter' && e.target.matches?.('input[data-ch]')) { e.target.blur(); return; }
+  if (e.target.matches?.('input, select, textarea')) return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { if (S.result) { e.preventDefault(); clickHandlers.export({ dataset: { fmt: 'fit' } }); } return; }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (DESK && S.tab === 'sync' && S.watch && S.srcMode !== 'watch' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    e.preventDefault();
+    clickHandlers.nudge({ dataset: { v: (e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 10 : 1) } });
+  } else if (e.key === 'e' && S.tab === 'sync' && S.result) clickHandlers.edit();
+  else if (DESK && ['1', '2', '3'].includes(e.key)) clickHandlers.tab({ dataset: { tab: ['sync', 'plan', 'help'][+e.key - 1] } });
 });
 document.addEventListener('change', e => {
   const el = e.target.closest('[data-ch]');
@@ -683,8 +831,8 @@ document.addEventListener('change', e => {
   const h = changeHandlers[el.dataset.ch];
   if (h) h(el, e);
 });
-$('#pick-watch').addEventListener('change', e => { loadFile('watch', e.target.files[0]); e.target.value = ''; });
-$('#pick-qz').addEventListener('change', e => { loadFile('qz', e.target.files[0]); e.target.value = ''; });
+$('#pick-watch').addEventListener('change', e => { const f = [...e.target.files]; e.target.value = ''; if (f.length > 1) loadAuto(f); else loadFile('watch', f[0]); });
+$('#pick-qz').addEventListener('change', e => { const f = [...e.target.files]; e.target.value = ''; if (f.length > 1) loadAuto(f); else loadFile('qz', f[0]); });
 $('#pick-plan').addEventListener('change', async e => {
   const f = e.target.files[0]; e.target.value = '';
   if (!f) return;
@@ -695,20 +843,54 @@ $('#pick-plan').addEventListener('change', async e => {
     planChanged(); toast(`Imported “${S.plan.name}”`);
   } catch (err) { toast(`Couldn’t import: ${err.message}`); }
 });
-// drag & drop
-document.addEventListener('dragover', e => { const t = e.target.closest?.('[data-drop]'); if (t) { e.preventDefault(); t.classList.add('drag'); } });
-document.addEventListener('dragleave', e => { const t = e.target.closest?.('[data-drop]'); if (t) t.classList.remove('drag'); });
+// drag & drop — on a tile, or anywhere (files are recognised automatically)
+let dragDepth = 0;
+const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');
+document.addEventListener('dragenter', e => { if (hasFiles(e)) { dragDepth++; document.body.classList.add('dragging'); } });
+document.addEventListener('dragleave', e => {
+  const t = e.target.closest?.('[data-drop]'); if (t) t.classList.remove('drag');
+  if (hasFiles(e) && --dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dragging'); }
+});
+document.addEventListener('dragover', e => { if (!hasFiles(e)) return; e.preventDefault(); const t = e.target.closest?.('[data-drop]'); if (t) t.classList.add('drag'); });
 document.addEventListener('drop', e => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); dragDepth = 0; document.body.classList.remove('dragging');
   const t = e.target.closest?.('[data-drop]');
-  if (!t) return;
-  e.preventDefault(); t.classList.remove('drag');
+  if (t) t.classList.remove('drag');
   const files = [...(e.dataTransfer?.files || [])];
-  if (files.length >= 2 && t.dataset.drop === 'watch') { loadFile('watch', files[0]).then(() => { S.srcMode = 'file'; loadFile('qz', files[1]); }); return; }
+  if (!files.length) return;
+  if (files.length >= 2 || !t) { loadAuto(files); return; }
   loadFile(t.dataset.drop, files[0]);
 });
+
+// chart hover / touch read-out
+function hideTips() { document.querySelectorAll('.chartwrap .tip, .chartwrap .cur').forEach(x => x.classList.add('hide')); }
+document.addEventListener('pointermove', e => {
+  const w = e.target.closest?.('.chartwrap');
+  if (!w) { hideTips(); return; }
+  const c = CHARTS[w.dataset.cid];
+  if (!c) return;
+  const svg = w.querySelector('svg'), rc = svg.getBoundingClientRect();
+  const x = (e.clientX - rc.left) / rc.width * c.W;
+  if (x < c.pl || x > c.W - c.pr) { hideTips(); return; }
+  const t = c.t0 + (x - c.pl) / (c.W - c.pl - c.pr) * (c.t1 - c.t0);
+  let lo = 0, hi = c.recs.length - 1;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (c.recs[m].t < t) lo = m + 1; else hi = m; }
+  const r = c.recs[lo];
+  const lap = c.laps.find(l => lo >= l.i0 && lo < l.i1);
+  const cur = svg.querySelector('.cur');
+  cur.setAttribute('x1', c.X(r.t)); cur.setAttribute('x2', c.X(r.t)); cur.classList.remove('hide');
+  const tip = w.querySelector('.tip');
+  tip.innerHTML = `<b>${fmtDur((r.t - c.t0) / 1000)}</b>${lap ? ` · ${esc(lap.name)}` : ''}<br>${fmtPace(r.speed)}/km · ${kmh(r.speed)} km/h · ${km(r.dist)} km${r.hr ? `<br>HR ${r.hr}` : ''}${r.cad ? ` · ${spm(r.cad + (r.fcad || 0))} spm` : ''}${r.synthetic ? '<br><i>added to reach distance</i>' : ''}`;
+  tip.classList.remove('hide');
+  const wr = w.getBoundingClientRect();
+  const px = e.clientX - wr.left;
+  tip.style.left = `${Math.min(wr.width - tip.offsetWidth - 4, Math.max(4, px + 12 + tip.offsetWidth > wr.width ? px - tip.offsetWidth - 12 : px + 12))}px`;
+});
+document.addEventListener('pointerleave', hideTips);
 
 render();
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 
 // expose for debugging / tests
-window.RunSync = { S, loadFile, recompute };
+window.RunSync = { S, loadFile, loadAuto, recompute };
