@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>RunSync</title>
+  <meta name="description" content="Merge treadmill speed from QZ (qdomyos-zwift) into your watch's run file, fix the distance, detect intervals and export FIT / TCX / GPX / CSV.">
+  <meta name="theme-color" content="#f3f1ec" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0e1014" media="(prefers-color-scheme: dark)">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="RunSync">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true" class="logo"><rect width="32" height="32" rx="8" fill="var(--accent)"/><path d="M6 21h5l3-9 4 13 3-8h5" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>RunSync</span>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-act="tab" data-tab="sync" class="tab">Sync</button>
+      <button role="tab" data-act="tab" data-tab="plan" class="tab">Plan</button>
+      <button role="tab" data-act="tab" data-tab="help" class="tab">Help</button>
+    </nav>
+  </header>
+  <main id="app" aria-live="polite"></main>
+  <input type="file" id="pick-watch" hidden>
+  <input type="file" id="pick-qz" hidden>
+  <input type="file" id="pick-plan" accept=".json,application/json" hidden>
+  <div id="toast" class="toast" role="status"></div>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

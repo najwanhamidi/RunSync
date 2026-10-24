@@ -1,0 +1,5 @@
+test/out/
+node_modules/
+*.fit
+!test/fixtures/*.fit
+.DS_Store

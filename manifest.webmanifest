@@ -1,0 +1,16 @@
+{
+  "name": "RunSync — treadmill speed × watch data",
+  "short_name": "RunSync",
+  "description": "Merge treadmill speed from QZ into your watch run file, fix distance, detect intervals and export FIT/TCX/GPX/CSV.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f1ec",
+  "theme_color": "#f0501d",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
