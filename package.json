@@ -1,6 +1,6 @@
 {
   "name": "runsync",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "private": true,
   "type": "module",
   "description": "Merge treadmill speed (QZ / qdomyos-zwift) into your watch's run file",

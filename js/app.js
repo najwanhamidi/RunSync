@@ -2,13 +2,13 @@
 import { readActivityFile, toTCX, toGPX, toCSV, lapsToCSV, parseClock } from './formats.js';
 import {
   sourceFromActivity, sourceFromSegments, autoAlign, alignBySignals, alignmentCheck, syncRun, detectRun,
-  buildLaps, kmBounds, summarize, planFromDetection, fmtDur, fmtPace,
+  buildLaps, kmBounds, summarize, planFromDetection, fmtDur, fmtPace, rampSource, analyzeWorkout,
 } from './engine.js';
 import { buildFit, DEVICES, resolveDevice } from './export.js';
 import { TEMPLATES, STEP_TYPES, clonePlan, flattenPlan, planRecords, step, repeat, uid, withIds, stepDur, typeLabel } from './plan.js';
-import { lapGroups, setGroupDuration, setGroupDurations, groupRange, setGroupName, setGroupType, intervalShape, setRepCount, shiftSet, snapToChanges, durations } from './laps.js';
+import { lapGroups, setGroupDuration, setGroupDurations, groupRange, setGroupDistance, setGroupDistances, groupDistStats, setLapDistance, parseDistInput, setGroupName, setGroupType, intervalShape, setRepCount, shiftSet, snapToChanges, durations } from './laps.js';
 
-export const VERSION = '3.0';
+export const VERSION = '4.0';
 const DESK = document.body.dataset.layout === 'desktop';
 
 // ------------------------------------------------------------------ utils
@@ -47,7 +47,7 @@ const ICON = {
 };
 
 // ------------------------------------------------------------------ state
-const settings = Object.assign({ minSpeed: 3, distMode: 'extend', recalc: true, device: 'trex3', lapKm: 1 }, store.get('settings', {}));
+const settings = Object.assign({ minSpeed: 3, distMode: 'extend', recalc: true, device: 'trex3', lapKm: 1, sensorLag: 'auto', ramp: 0, editBy: 'time' }, store.get('settings', {}));
 const S = {
   tab: 'sync',
   watch: null, watchErr: null,
@@ -61,6 +61,7 @@ const S = {
   plan: store.get('plan', null) ? withIds(store.get('plan')) : clonePlan(TEMPLATES[0]),
   saved: store.get('saved', []),
   planView: 'laps',
+  showAnalysis: false,
 };
 const saveSettings = () => store.set('settings', settings);
 const savePlan = () => store.set('plan', S.plan);
@@ -88,19 +89,22 @@ function compute() {
   if (S.srcMode === 'watch' && !(target > 0)) { S.error = 'Enter the actual distance — watch-only mode scales the watch’s own pace to match it.'; return; }
   try {
     const res = syncRun({
-      watch: S.watch, source,
+      watch: S.watch, source: S.srcMode === 'watch' ? source : rampSource(source, +settings.ramp),
       offsetSec: S.srcMode === 'file' ? S.offset : 0,
       minSpeedKmh: settings.minSpeed,
       targetKm: target > 0 ? target : null,
       distMode: S.srcMode === 'watch' ? 'scale' : settings.distMode,
       recalcStep: settings.recalc,
       trimStart: S.srcMode !== 'plan',
+      sensorLag: S.srcMode === 'watch' ? 'off' : settings.sensorLag,
+      lagSource: source,
     });
     res.det = detectRun(res.records, { sourceKind: S.srcMode === 'watch' ? 'watch' : 'file', lapStarts: (S.watch.laps || []).map(l => l.start) });
     res.calories = S.watch.session?.calories ?? null;
     res.km = buildLaps(res.records, kmBounds(res.records, 1), { calories: res.calories });
     applyLaps(res);
     res.summary = summarize(res.records, res.calories);
+    if (S.showAnalysis) res.analysis = analyzeWorkout(res.records, res.laps, { target: res.info.finalDist && res.opts.targetKm ? res.opts.targetKm * 1000 : null, sensor: res.info.sensor });
     S.result = res;
   } catch (e) { console.error(e); S.error = e.message; }
 }
@@ -215,10 +219,14 @@ function lapTable(laps, { hr = true, edit = false, total = null, kind = 'run' } 
     const name = edit
       ? `<div class="editname"><select class="inp sm" data-ch="lap-type" data-k="${k}">${typeOpts(l.type)}</select><input class="inp sm" id="lapn-${k}" data-ch="lap-name" data-k="${k}" value="${esc(l.name)}"></div>`
       : `<div class="lapname"><span class="dot"></span><span class="ln">${esc(l.name || `Lap ${k + 1}`)}</span></div>`;
-    const time = edit && k < laps.length - 1
+    const byD = edit && settings.editBy === 'distance';
+    const time = edit && !byD && k < laps.length - 1
       ? `<input class="inp sm num" id="lapd-${k}" data-ch="lap-dur" data-k="${k}" value="${fmtDur(l.duration)}" style="width:76px">`
       : fmtDur(l.duration);
-    return `<tr class="t-${l.type}"><td class="idx">${k + 1}</td><td>${name}</td><td class="n">${time}</td><td class="n">${km(l.distance)}</td>
+    const distCell = byD && k < laps.length - 1
+      ? `<input class="inp sm num" id="lapm-${k}" data-ch="lap-dist" data-k="${k}" value="${km(l.distance)}" style="width:70px">`
+      : km(l.distance);
+    return `<tr class="t-${l.type}"><td class="idx">${k + 1}</td><td>${name}</td><td class="n">${time}</td><td class="n">${distCell}</td>
       <td class="pacebar"><div class="bar" style="width:${w}%"><span>${fmtPace(l.avgSpeed)}</span></div></td>
       ${hr ? `<td class="n">${l.avgHr ?? '–'}</td><td class="n">${spm(l.avgCad)}</td>` : `<td class="n">${kmh(l.avgSpeed)}</td>`}
       ${edit ? `<td><div class="lapactions"><button class="btn sm icon" title="Split lap in two" data-act="lap-split" data-k="${k}">${ICON.split}</button>${k < laps.length - 1 ? `<button class="btn sm icon" title="Merge with next lap" data-act="lap-merge" data-k="${k}">${ICON.merge}</button>` : ''}</div></td>` : ''}</tr>`;
@@ -310,51 +318,146 @@ function cardSettings() {
       ${S.srcMode !== 'plan' ? `<label class="field"><span>Ignore startup speed below</span><div class="unit"><input class="inp num" id="minsp" data-ch="minspeed" value="${settings.minSpeed}" autocomplete="off"><em>km/h</em></div></label>` : ''}
       ${S.srcMode !== 'watch' ? `<label class="field"><span>How to reach the actual distance</span><select class="inp" data-ch="distmode"><option value="extend"${settings.distMode === 'extend' ? ' selected' : ''}>Extend / trim the end (recommended)</option><option value="scale"${settings.distMode === 'scale' ? ' selected' : ''}>Scale every speed proportionally</option></select></label>` : ''}
       <label class="switch"><input type="checkbox" data-ch="recalc"${settings.recalc ? ' checked' : ''}><span><span class="t">Recalculate step length</span><br><span class="d">Step length &amp; vertical ratio from treadmill speed ÷ cadence.</span></span></label>
+      ${S.srcMode !== 'watch' ? sensorBlock() : ''}
     </div></div></section>`;
+}
+
+function sensorBlock() {
+  const sen = S.result?.info?.sensor;
+  const mode = settings.sensorLag === 'auto' ? 'auto' : settings.sensorLag === 'off' || !settings.sensorLag ? 'off' : 'manual';
+  const names = { cad: 'cadence', st: 'stance time', vo: 'vertical oscillation', power: 'power' };
+  let detail = '';
+  if (sen && mode === 'auto') {
+    const ls = Object.entries(sen.lags || {});
+    detail = ls.length
+      ? `Measured over ${sen.steps} speed-ups: ${ls.map(([k, v]) => `${names[k]} ${v ? `<b>${v} s late</b>` : 'on time'}`).join(', ')}.${ls.some(([, v]) => v) ? ' Those channels are shifted earlier to line up with the treadmill.' : ''}`
+      : esc(sen.reason || 'No delay measured.');
+  } else if (mode === 'manual') detail = `Cadence and stance time are shifted ${settings.sensorLag} s earlier.`;
+  else detail = 'Watch values are used exactly as recorded.';
+  return `<div class="field"><span class="flbl">Watch sensor delay</span>
+    <div class="row" style="gap:6px"><select class="inp sm" data-ch="sensorlag" style="width:auto"><option value="auto"${mode === 'auto' ? ' selected' : ''}>Auto-correct (recommended)</option><option value="manual"${mode === 'manual' ? ' selected' : ''}>Fixed delay…</option><option value="off"${mode === 'off' ? ' selected' : ''}>Off</option></select>
+    ${mode === 'manual' ? `<div class="unit" style="width:90px"><input class="inp sm num" id="lagsec" data-ch="lagsec" value="${settings.sensorLag}" autocomplete="off"><em>s</em></div>` : ''}</div>
+    <div class="small muted" style="margin-top:4px">${detail} Heart rate is never shifted — its lag is real.</div></div>
+    <div class="field"><span class="flbl">Treadmill speed changes</span>
+    <div class="row" style="gap:6px"><select class="inp sm" data-ch="rampmode" style="width:auto"><option value="0"${!(+settings.ramp > 0) ? ' selected' : ''}>Instant (as QZ logged)</option><option value="ramp"${+settings.ramp > 0 ? ' selected' : ''}>Belt ramps…</option></select>
+    ${+settings.ramp > 0 ? `<div class="unit" style="width:120px"><input class="inp sm num" id="ramp" data-ch="ramp" value="${settings.ramp}" autocomplete="off"><em>km/h/s</em></div>` : ''}</div>
+    <div class="small muted" style="margin-top:4px">QZ logs the speed it sets; a real belt needs a few seconds to get there (often ~1 km/h per second). Ramping makes the seconds around each change — and the step length there — more realistic. Lap distances shift by a few metres; the total is unchanged once the actual distance is set.</div></div>`;
 }
 
 const GROUP_LABEL = { warmup: 'Warm up', active: 'Reps / runs', rest: 'Recoveries', cooldown: 'Cool down' };
 
+const fmtM = m => (m >= 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`);
+const kmBox = m => (Math.round(m / 10) / 100).toFixed(2);
+
 function setEditor(r) {
   const bounds = S.custom && S.lapMode === 'custom' ? S.custom : r.laps.map(l => ({ t: l.start, type: l.type, name: l.name }));
-  const end = r.records[r.records.length - 1].t;
+  const recs = r.records;
+  const end = recs[recs.length - 1].t;
+  const byDist = settings.editBy === 'distance';
   const groups = lapGroups(bounds, end);
   const shape = intervalShape(bounds);
   const durs = durations(bounds, end);
   const typeOpts = t => STEP_TYPES.map(o => `<option value="${o.id}"${o.id === t ? ' selected' : ''}>${o.label}</option>`).join('');
-  const uneven = groups.filter(g => g.editable && !g.uniform);
+  // per-kind distance stats; "exact" for distance = within one second of running (records are 1 s apart)
+  for (const g of groups) {
+    g.ds = groupDistStats(bounds, recs, g.type);
+    const fast = Math.max(...g.idx.map(k => r.laps[k]?.maxSpeed || 0), 3);
+    g.distUniform = !g.ds || g.ds.max - g.ds.min <= fast * 1.05;
+    g.boxDist = g.ds ? Math.round(g.ds.med / 10) * 10 : null;
+  }
+  const uneven = groups.filter(g => g.editable && !(byDist ? g.distUniform : g.uniform));
   const rows = groups.map(g => {
-    const rg = groupRange(bounds, end, g.type);
     const n = g.idx.filter(k => k !== bounds.length - 1).length;
-    const status = g.lastOnly ? 'runs to the end of the recording'
-      : g.uniform ? `<span class="ok">✓ ${n > 1 ? `all ${n} exactly` : 'exactly'} ${fmtDur(rg[0])}</span>`
-      : `<span class="warn">now ${fmtDur(rg[0])}–${fmtDur(rg[1])} — Apply makes all ${n} the same</span>`;
+    let status, box;
+    if (g.lastOnly) { status = 'runs to the end of the recording'; box = `<input class="inp sm num" value="to the end" disabled>`; }
+    else if (byDist) {
+      status = g.distUniform ? `<span class="ok">✓ ${n > 1 ? `all ${n}` : ''} ${fmtM(g.ds.med)}${n > 1 && g.ds.max - g.ds.min >= 1 ? ` (±${Math.ceil((g.ds.max - g.ds.min) / 2)} m — one second of running)` : ''}</span>`
+        : `<span class="warn">now ${fmtM(g.ds.min)}–${fmtM(g.ds.max)} — Apply makes all ${n} the same distance</span>`;
+      box = `<div class="se-lenrow"><input class="inp sm num" id="se-dist-${g.type}" data-ch="se-dist" data-type="${g.type}" value="${kmBox(g.boxDist)}" autocomplete="off" aria-label="Distance of every ${esc(GROUP_LABEL[g.type] || g.type)} lap in km"><em class="unitlbl">km</em><button class="btn sm ${g.distUniform ? '' : 'primary'}" data-act="se-apply" data-type="${g.type}">Apply</button></div>`;
+    } else {
+      const rg = groupRange(bounds, end, g.type);
+      status = g.uniform ? `<span class="ok">✓ ${n > 1 ? `all ${n} exactly` : 'exactly'} ${fmtDur(rg[0])}</span>`
+        : `<span class="warn">now ${fmtDur(rg[0])}–${fmtDur(rg[1])} — Apply makes all ${n} the same</span>`;
+      box = `<div class="se-lenrow"><input class="inp sm num" id="se-dur-${g.type}" data-ch="se-dur" data-type="${g.type}" value="${fmtDur(g.dur)}" autocomplete="off" aria-label="Length of every ${esc(GROUP_LABEL[g.type] || g.type)} lap"><button class="btn sm ${g.uniform ? '' : 'primary'}" data-act="se-apply" data-type="${g.type}">Apply</button></div>`;
+    }
     return `<div class="se-row t-${g.type}">
       <div class="se-name"><span class="dot"></span><b>${GROUP_LABEL[g.type] || typeLabel(g.type)}</b><span class="muted"> × ${g.count}</span></div>
-      <div class="se-f se-len"><span>Each lasts</span>${g.lastOnly
-        ? `<input class="inp sm num" value="to the end" disabled>`
-        : `<div class="se-lenrow"><input class="inp sm num" id="se-dur-${g.type}" data-ch="se-dur" data-type="${g.type}" value="${fmtDur(g.dur)}" autocomplete="off" aria-label="Length of every ${esc(GROUP_LABEL[g.type] || g.type)} lap"><button class="btn sm ${g.uniform ? '' : 'primary'}" data-act="se-apply" data-type="${g.type}">Apply</button></div>`}
-        <div class="se-status">${status}</div></div>
+      <div class="se-f se-len"><span>${byDist ? 'Each covers' : 'Each lasts'}</span>${box}<div class="se-status">${status}</div></div>
       <label class="se-f"><span>Name</span><input class="inp sm" id="se-name-${g.type}" data-ch="se-name" data-type="${g.type}" value="${esc(g.pattern)}" placeholder="${g.count > 1 ? 'e.g. Rep #' : 'Name'}" autocomplete="off"></label>
       <label class="se-f"><span>Type</span><select class="inp sm" data-ch="se-type" data-type="${g.type}">${typeOpts(g.type)}</select></label>
     </div>`;
   }).join('');
   const med = ks => { const v = ks.map(k => durs[k]).sort((a, b) => a - b); return v[v.length >> 1]; };
   const repTxt = shape ? `${shape.reps.length} × ${fmtDur(med(shape.reps))}${shape.recs.length ? ` / ${fmtDur(med(shape.recs))}` : ''}` : '';
-  const exactLbl = groups.filter(g => g.editable).map(g => fmtDur(g.dur)).join(' / ');
+  const exactLbl = groups.filter(g => g.editable).map(g => (byDist ? fmtM(g.boxDist) : fmtDur(g.dur))).join(' / ');
   return `<div class="seteditor">
     <div class="se-head"><div><b>Edit as a set</b> <span class="small muted">— one box changes every lap of that kind</span></div>
-      ${shape ? `<label class="se-count">Reps <input class="inp sm num" id="se-count" data-ch="se-count" value="${shape.reps.length}" autocomplete="off"><span class="small muted">${repTxt}</span></label>` : ''}</div>
-    ${uneven.length ? `<div class="se-exact"><div><b>Some laps are a second or two off</b> (${uneven.map(g => (GROUP_LABEL[g.type] || g.type).toLowerCase()).join(', ')}). Make every lap exactly the length in its box — later laps shift to follow.</div>
+      <div class="row" style="gap:10px">
+        <div class="seg" role="group" aria-label="Edit laps by">${[['time', 'By time'], ['distance', 'By distance']].map(([v, l]) => `<button data-act="editby" data-v="${v}" aria-pressed="${settings.editBy === v}">${l}</button>`).join('')}</div>
+        ${shape ? `<label class="se-count">Reps <input class="inp sm num" id="se-count" data-ch="se-count" value="${shape.reps.length}" autocomplete="off"><span class="small muted">${repTxt}</span></label>` : ''}
+      </div></div>
+    ${uneven.length ? `<div class="se-exact"><div><b>${byDist ? 'Some laps cover different distances' : 'Some laps are a second or two off'}</b> (${uneven.map(g => (GROUP_LABEL[g.type] || g.type).toLowerCase()).join(', ')}). Make every lap exactly the ${byDist ? 'distance' : 'length'} in its box — later laps shift to follow.</div>
       <button class="btn primary" data-act="se-exact">Make all exact · ${exactLbl}</button></div>` : ''}
     ${rows}
     <div class="row se-tools">
       <span class="small muted">Move all boundaries</span>
       <button class="btn sm" data-act="se-shift" data-v="-1">−1 s</button><button class="btn sm" data-act="se-shift" data-v="1">+1 s</button>
       <button class="btn sm" data-act="se-snap" title="Move each lap boundary onto the nearest speed change (±12 s)">Snap to speed changes</button>
+      <button class="btn sm dark" data-act="analyze">Re-analyze workout</button>
       <button class="btn sm ghost" data-act="lap-reset">Reset to auto-detected</button>
     </div>
-    <div class="small muted">Laps are laid end to end from the start of the warm up, so every rep and recovery gets exactly its length and the ones after it shift along; the last lap (usually the cool down) takes up the difference. Type a length and press Enter or Apply. Use “#” in a name for the lap number, e.g. “Rep #”. Fine-tune single laps in the table below.</div>
+    <div class="small muted">${byDist
+      ? 'Distances are measured along the synced treadmill distance. Laps are laid end to end from the start of the warm up; each ends on the second its distance is reached (records are 1 s apart, so “exact” is within one second of running). Type a distance in km (0.73) or metres (730 m).'
+      : 'Laps are laid end to end from the start of the warm up, so every rep and recovery gets exactly its length and the ones after it shift along.'} The last lap (usually the cool down) takes up the difference. Use “#” in a name for the lap number, e.g. “Rep #”. Fine-tune single laps in the table below.</div>
+  </div>`;
+}
+
+function analysisReport(r) {
+  const a = r.analysis;
+  if (!a) return '';
+  const kmSplits = r.laps.every(l => l.trigger === 'distance');
+  const li = [];
+  const ok = (t) => li.push(`<li class="ok">${t}</li>`), warn = (t) => li.push(`<li class="warn">${t}</li>`), info = (t) => li.push(`<li>${t}</li>`);
+  if (a.changes && !kmSplits) {
+    const nb = a.boundaries.length;
+    if (a.onChange === nb) ok(`All ${nb} lap boundaries sit on a treadmill speed change (within 1 s).`);
+    else {
+      info(`${a.onChange} of ${nb} lap boundaries sit on a treadmill speed change (within 1 s).`);
+      if (a.nearChange.length) warn(`${a.nearChange.length} boundar${a.nearChange.length === 1 ? 'y is' : 'ies are'} a little off: ${a.nearChange.slice(0, 8).map(b => `${esc(b.name)} ${b.off > 0 ? '+' : ''}${Math.round(b.off)} s`).join(', ')}${a.nearChange.length > 8 ? '…' : ''}. ${a.nearChange.every(b => Math.abs(b.off) <= 2) ? 'That’s the treadmill’s own 1–2 s jitter, expected after “Make all exact” — use Snap if you’d rather follow the speed changes.' : 'Snap moves them onto the nearest speed change.'}`);
+      const far = a.noChange.filter(b => b.off == null || Math.abs(b.off) > 15);
+      if (far.length) warn(`${far.length} boundar${far.length === 1 ? 'y is' : 'ies are'} nowhere near a speed change: ${far.slice(0, 6).map(b => esc(b.name)).join(', ')}.`);
+    }
+    if (a.inside.length) warn(`A speed change falls inside a lap: ${a.inside.slice(0, 5).map(c => `<button class="linkbtn" data-act="an-split" data-t="${c.t}">split at ${fmtDur((c.t - r.records[0].t) / 1000)}</button> (${kmh(c.from)} → ${kmh(c.to)} km/h${c.lap >= 0 ? ` in ${esc(r.laps[c.lap].name)}` : ''})`).join(', ')}.`);
+    else ok('Every treadmill speed change starts a new lap.');
+  } else if (kmSplits) info('Laps are distance splits, so they aren’t expected to line up with speed changes.');
+  if (a.mixed.length) warn(`Laps mixing two speeds: ${a.mixed.slice(0, 6).map(m => `${esc(m.name)} (${m.away} s off its ${m.main} km/h)`).join(', ')}.`);
+  else if (!kmSplits) ok('No lap mixes two treadmill speeds (beyond 1 s).');
+  for (const c of a.consistency) {
+    const same = (x, y, tol) => Math.abs(x - y) <= tol;
+    info(`${GROUP_LABEL[c.type] || c.type} × ${c.count}: ${same(c.dur[0], c.dur[1], 0.5) ? fmtDur(c.dur[0]) : `${fmtDur(c.dur[0])}–${fmtDur(c.dur[1])}`} · ${same(c.dist[0], c.dist[1], 1) ? fmtM(c.dist[0]) : `${fmtM(c.dist[0])}–${fmtM(c.dist[1])}`} · ${fmtPace(c.pace[0]) === fmtPace(c.pace[1]) ? fmtPace(c.pace[0]) : `${fmtPace(c.pace[0])}–${fmtPace(c.pace[1])}`} /km`);
+  }
+  const sen = r.info.sensor;
+  if (a.cadence && a.cadence.t50 != null) {
+    const lagTxt = sen?.lags?.cad ? ` after correcting the watch’s ${sen.lags.cad} s cadence delay` : sen?.mode === 'off' ? ' (delay correction is off)' : '';
+    const good = a.cadence.voT50 == null ? a.cadence.t50 <= 5 : Math.abs(a.cadence.t50 - a.cadence.voT50) <= 2;
+    (good ? ok : warn)(`Cadence reacts ${a.cadence.t50} s after the treadmill speeds up${a.cadence.voT50 != null ? ` (vertical oscillation: ${a.cadence.voT50} s)` : ''}${lagTxt}.${good ? '' : ' Check the sensor-delay setting in step 3.'}`);
+  }
+  if (a.badSteps != null) {
+    const ramp = +settings.ramp > 0;
+    if (a.badSteps <= 3) ok(`Step length is realistic throughout${ramp ? ` (belt ramp ${settings.ramp} km/h per s)` : ''}.`);
+    else warn(`${a.badSteps} s have an unrealistic step length (under 0.45 m or over 1.7 m), mostly right after speed changes — QZ logs the new speed instantly while the belt is still getting there. ${ramp ? 'Try a slower belt ramp.' : '<button class="linkbtn" data-act="an-ramp">Model a belt ramp of 1 km/h per second</button> to fix it.'}`);
+  }
+  if (a.target) (a.distanceOk ? ok : warn)(`Total ${km(a.distance)} km ${a.distanceOk ? '= actual distance' : `vs actual ${km(a.target)} km`}.`);
+  else info(`Total ${km(a.distance)} km (no actual distance set).`);
+  const fixBtns = !kmSplits && a.changes ? `<div class="row" style="gap:6px">
+      ${a.nearChange.length || a.noChange.length ? `<button class="btn sm" data-act="se-snap">Snap boundaries to speed changes</button>` : ''}
+      <button class="btn sm" data-act="an-exact" data-by="time">Make all exact by time</button>
+      <button class="btn sm" data-act="an-exact" data-by="distance">Make all exact by distance</button></div>` : '';
+  return `<div class="report" id="report">
+    <div class="row between"><div><b>Workout check</b> <span class="small muted">· updates as you edit</span></div><button class="btn sm icon ghost" data-act="analyze-close" title="Close">${ICON.x}</button></div>
+    <div><span class="badge sm"><span class="k">Now reads as</span>${esc(a.label)}</span></div>
+    <ul class="checks">${li.join('')}</ul>
+    ${fixBtns}
   </div>`;
 }
 
@@ -409,7 +512,8 @@ function cardResult() {
     ${editing ? `<div class="small muted">Change a lap’s time to move its end. Split halves a lap; merge joins it with the next.</div>` : ''}`;
   }
   return `<section class="card"><h2><span class="step">4</span>Result<span class="grow"></span></h2><div class="stack">
-    <div class="row between"><span class="badge"><span class="k">Detected</span>${esc(r.det.label)}</span>${DESK ? '' : ''}</div>
+    <div class="row between"><span class="badge"><span class="k">${r.analysis && S.lapMode === 'custom' ? 'Edited' : 'Detected'}</span>${esc(r.analysis && S.lapMode === 'custom' ? r.analysis.label : r.det.label)}</span>${!S.showAnalysis ? '<button class="btn sm dark" data-act="analyze">Re-analyze workout</button>' : ''}</div>
+    ${analysisReport(r)}
     ${stats}
     <ul class="notes">${resultNotes(r).map(n => `<li>${esc(n)}</li>`).join('')}</ul>
     ${profileChart(r.records, view === 'km' ? r.km : r.laps)}
@@ -548,9 +652,13 @@ function viewHelp() {
     <ul><li><b>Startup speed:</b> QZ often sits at ~0.8 km/h for a couple of seconds before your speed is set. Everything below the threshold (default 3 km/h), and any ramp-up, is cut. The file starts the moment the intended speed is set.</li>
     <li><b>Actual distance:</b> if the treadmill total is short, seconds are added at the end at the last speed. HR and cadence for those seconds are copied from the last few seconds; nothing earlier changes. If it is long, the end is cut where the distance is reached.</li>
     <li><b>Step length:</b> the watch guesses step length from its own (wrong) pace. With this on, step length and vertical ratio are recalculated from treadmill speed ÷ cadence.</li></ul>
+    <h3>Sensor delay &amp; belt ramp</h3>
+    <p>The watch reports some metrics late. On the Amazfit T-Rex 3, cadence and stance time arrive about 7 s after your stride really changes, while vertical oscillation is on time. RunSync measures this delay on every run (from each clear speed-up) and shifts those channels back so they line up with the treadmill. Heart rate is never shifted, because its lag is real.</p>
+    <p>QZ logs a new speed the moment it sets it, but the belt takes several seconds to get there. Turn on <b>Belt ramps</b> (about 1 km/h per second) to model that. The <b>Workout check</b> tells you when step lengths around speed changes look unrealistic.</p>
     <h3>4 · Laps</h3>
     <p>RunSync reads the speed profile to work out the session: <b>intervals</b> (warm up · reps · recoveries · cool down), <b>pyramid</b>, <b>fartlek</b>, <b>progression</b>, <b>tempo</b> or an <b>easy / long run</b> (1 km splits). You can switch to N km splits, the watch’s own laps or one lap.</p>
     <p>Tap <b>Edit laps</b> to change them. <b>Edit as a set</b> changes every lap of one kind at once: type one length for the reps and all 10 reps get it, and later laps move along. If detection gave some laps 2:59 / 1:01 or 3:01 / 0:59, tap <b>Make all exact</b> (or Apply / Enter on a box) and every rep and recovery gets exactly its length, with the laps after it shifting to follow. You can also change the number of reps, rename them all (“Rep #” numbers them), change their type, shift every boundary by ±1 s, or <b>snap</b> boundaries onto the treadmill’s speed changes. The table underneath still edits one lap at a time.</p>
+    <p>Switch the editor between <b>By time</b> and <b>By distance</b>. In distance mode every rep can be set to, say, 0.75 km, with laps measured along the synced treadmill distance. <b>Re-analyze workout</b> opens a check that updates as you edit. It shows what the workout now reads as, whether every lap boundary sits on a treadmill speed change, any speed change hidden inside a lap (one tap splits it), laps that mix two speeds, how consistent each kind of lap is, whether cadence follows speed, and the total distance.</p>
     <h3>5 · Export</h3>
     <p>FIT is the best option for Strava, Garmin Connect, Intervals.icu, Runalyze and TrainingPeaks. Choose which device the file says it came from (default Amazfit T-Rex 3). On a phone, <b>Share FIT</b> sends it straight to another app.</p>
     <h3>Desktop version</h3>
@@ -562,7 +670,15 @@ function viewHelp() {
 }
 
 // ------------------------------------------------------------------ render
+let rendering = false, renderAgain = false;
 function render() {
+  // a re-render removes the focused input; its blur can fire 'change' → render() again mid-update
+  if (rendering) { renderAgain = true; return; }
+  rendering = true;
+  try { renderNow(); } finally { rendering = false; }
+  if (renderAgain) { renderAgain = false; queueMicrotask(render); }
+}
+function renderNow() {
   document.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === S.tab)));
   const ae = document.activeElement;
   const focusId = ae && ae.id && $('#app').contains(ae) ? ae.id : null;
@@ -683,6 +799,12 @@ function ensureCustom() {
   if (!S.custom || S.lapMode !== 'custom') { S.custom = S.result.laps.map(l => ({ t: l.start, type: l.type, name: l.name, trigger: l.trigger })); S.lapMode = 'custom'; }
 }
 const endT = () => S.result.records[S.result.records.length - 1].t;
+function applyGroupDist(type, value) {
+  const m = parseDistInput(value);
+  if (!(m > 0)) { toast('Type a distance like 0.73 (km) or 730 m'); return render(); }
+  ensureCustom();
+  setCustom(setGroupDistance(S.custom, S.result.records, type, m));
+}
 function applyGroupDur(type, value) {
   const sec = parseDurInput(value);
   if (!(sec > 0)) { toast('Type a length like 3:00 (or 3 for three minutes)'); return render(); }
@@ -696,9 +818,40 @@ function setCustom(nb, what) {
 }
 
 const clickHandlers = {
-  'se-apply': el => { const inp = document.getElementById(`se-dur-${el.dataset.type}`); if (inp) applyGroupDur(el.dataset.type, inp.value); },
+  'se-apply': el => {
+    const t = el.dataset.type;
+    const inp = document.getElementById(`se-${settings.editBy === 'distance' ? 'dist' : 'dur'}-${t}`);
+    if (!inp) return;
+    if (settings.editBy === 'distance') applyGroupDist(t, inp.value); else applyGroupDur(t, inp.value);
+  },
+  'an-ramp': () => { settings.ramp = 1; saveSettings(); S.custom = null; if (S.lapMode === 'custom') S.lapMode = 'auto'; recompute(); toast('Belt ramp 1 km/h per second — laps re-detected'); },
+  editby: el => { settings.editBy = el.dataset.v; saveSettings(); render(); },
+  analyze: () => { S.showAnalysis = true; recompute(); document.getElementById('report')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); },
+  'analyze-close': () => { S.showAnalysis = false; recompute(); },
+  'an-split': el => {
+    ensureCustom();
+    const t = +el.dataset.t;
+    const k = S.custom.findIndex((b, j) => b.t <= t && (j + 1 >= S.custom.length || S.custom[j + 1].t > t));
+    const base = S.custom[Math.max(0, k)];
+    S.custom.splice(k + 1, 0, { t, type: base.type, name: `${base.name} (2)` });
+    setCustom(S.custom.slice()); toast('Lap split at the speed change — set its type above if needed');
+  },
+  'an-exact': el => { settings.editBy = el.dataset.by; saveSettings(); S.editing = true; clickHandlers['se-exact'](); },
   'se-exact': () => {
     ensureCustom();
+    if (settings.editBy === 'distance') {
+      const recs = S.result.records, map = {};
+      for (const g of lapGroups(S.custom, endT())) {
+        if (!g.editable) continue;
+        const inp = document.getElementById(`se-dist-${g.type}`);
+        const st = groupDistStats(S.custom, recs, g.type);
+        const v = inp ? parseDistInput(inp.value) : NaN;
+        map[g.type] = v > 0 ? v : Math.round(st.med / 10) * 10;
+      }
+      setCustom(setGroupDistances(S.custom, recs, map));
+      toast(`Every lap set to the same distance: ${Object.entries(map).map(([t, v]) => `${(GROUP_LABEL[t] || t).toLowerCase()} ${fmtM(v)}`).join(', ')}`);
+      return;
+    }
     const map = {};
     for (const g of lapGroups(S.custom, endT())) {
       if (!g.editable) continue;
@@ -790,6 +943,16 @@ const clickHandlers = {
 
 const changeHandlers = {
   'se-dur': el => applyGroupDur(el.dataset.type, el.value),
+  'se-dist': el => applyGroupDist(el.dataset.type, el.value),
+  'lap-dist': el => {
+    const m = parseDistInput(el.value);
+    if (!(m > 0)) return render();
+    setCustom(setLapDistance(S.custom, S.result.records, +el.dataset.k, m));
+  },
+  sensorlag: el => { settings.sensorLag = el.value === 'manual' ? (typeof settings.sensorLag === 'number' ? settings.sensorLag : 7) : el.value; saveSettings(); S.custom = null; if (S.lapMode === 'custom') S.lapMode = 'auto'; recompute(); },
+  lagsec: el => { const v = parseFloat(el.value.replace(',', '.')); if (v >= 0 && v <= 30) { settings.sensorLag = Math.round(v); saveSettings(); } recompute(); },
+  rampmode: el => { settings.ramp = el.value === 'ramp' ? (+settings.ramp > 0 ? settings.ramp : 1) : 0; saveSettings(); S.custom = null; if (S.lapMode === 'custom') S.lapMode = 'auto'; recompute(); },
+  ramp: el => { const v = parseFloat(el.value.replace(',', '.')); if (v > 0 && v <= 10) { settings.ramp = v; saveSettings(); } recompute(); },
   'se-name': el => { ensureCustom(); setCustom(setGroupName(S.custom, el.dataset.type, el.value.trim())); },
   'se-type': el => { ensureCustom(); setCustom(setGroupType(S.custom, el.dataset.type, el.value)); },
   'se-count': el => { const n = parseInt(el.value, 10); if (!(n >= 1 && n <= 60)) return render(); ensureCustom(); setCustom(setRepCount(S.custom, endT(), n), 'count'); },
@@ -846,6 +1009,7 @@ document.addEventListener('click', e => {
 document.addEventListener('keydown', e => {
   if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('.tile[data-act="pick"]')) { e.preventDefault(); e.target.click(); return; }
   if (e.key === 'Enter' && e.target.matches?.('input[data-ch="se-dur"]')) { e.preventDefault(); const t = e.target; applyGroupDur(t.dataset.type, t.value); return; }
+  if (e.key === 'Enter' && e.target.matches?.('input[data-ch="se-dist"]')) { e.preventDefault(); const t = e.target; applyGroupDist(t.dataset.type, t.value); return; }
   if (e.key === 'Enter' && e.target.matches?.('input[data-ch="se-count"]')) { e.preventDefault(); changeHandlers['se-count'](e.target); return; }
   if (e.key === 'Enter' && e.target.matches?.('input[data-ch]')) { e.target.blur(); return; }
   if (e.target.matches?.('input, select, textarea')) return;

@@ -318,3 +318,16 @@ body[data-layout="desktop"] table.laps tbody tr:hover td { background: var(--car
   .se-len { grid-column: 1 / -1; }
   .se-name { padding-top: 0; }
 }
+
+/* ---------- v4: sensor delay, distance editing, workout check ---------- */
+.flbl { display: block; font-size: 12.5px; font-weight: 600; color: var(--ink-2); margin-bottom: 4px; }
+.unitlbl { font-style: normal; font-size: 12px; color: var(--ink-3); align-self: center; }
+.report { border: 1.5px solid var(--ink); border-radius: 12px; background: var(--card); padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.badge.sm { font-size: 13px; padding: 4px 10px; background: var(--card-2); color: var(--ink); border: 1px solid var(--line); }
+.badge.sm .k { opacity: .65; }
+.checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; color: var(--ink-2); }
+.checks li { padding-left: 24px; position: relative; line-height: 1.4; }
+.checks li::before { content: '•'; position: absolute; left: 6px; top: 0; color: var(--ink-3); font-weight: 700; }
+.checks li.ok::before { content: '✓'; color: var(--ok); left: 4px; }
+.checks li.warn::before { content: '!'; color: #fff; background: var(--warn); border-radius: 50%; width: 16px; height: 16px; font-size: 11px; display: grid; place-items: center; left: 1px; top: 2px; }
+.linkbtn { border: 0; background: none; padding: 0; color: var(--accent); font-weight: 600; text-decoration: underline; cursor: pointer; font-size: inherit; }

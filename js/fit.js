@@ -53,7 +53,7 @@ export const PROFILE = {
   },
   20: { // record
     253: [BT.uint32], 0: [BT.sint32], 1: [BT.sint32], 2: [BT.uint16, 5, 500], 3: [BT.uint8], 4: [BT.uint8],
-    5: [BT.uint32, 100], 6: [BT.uint16, 1000], 7: [BT.uint16], 13: [BT.sint8], 39: [BT.uint16, 10],
+    5: [BT.uint32, 100], 6: [BT.uint16, 1000], 7: [BT.uint16], 13: [BT.sint8], 52: [BT.uint16, 256], 39: [BT.uint16, 10],
     41: [BT.uint16, 10], 53: [BT.uint8, 128], 73: [BT.uint32, 1000], 78: [BT.uint32, 5, 500],
     83: [BT.uint16, 100], 85: [BT.uint16, 10],
   },

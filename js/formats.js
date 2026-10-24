@@ -50,7 +50,7 @@ export function fitToActivity(fit, name) {
         dist: get(m, 5),
         hr: getRaw(m, 3),
         cad: getRaw(m, 4),
-        fcad: get(m, 53),
+        fcad: get(m, 53) ?? (getRaw(m, 52) != null && getRaw(m, 4) != null ? Math.max(0, getRaw(m, 52) / 256 - getRaw(m, 4)) : null),
         power: getRaw(m, 7),
         alt: get(m, 78) ?? get(m, 2),
         lat: lat != null ? lat * SEMI : null,

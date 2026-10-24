@@ -200,9 +200,85 @@ export function alignmentCheck(watch, source, offsetSec) {
 }
 
 // ---------------------------------------------------------------- sync
-const CARRY = ['hr', 'cad', 'fcad', 'power', 'alt', 'vo', 'st', 'vr', 'sl', 'temp', 'msg'];
+const CARRY = ['hr', 'cad', 'fcad', 'power', 'alt', 'vo', 'st', 'vr', 'sl', 'temp', 'msg', 'lagShifted'];
 
-export function syncRun({ watch, source, offsetSec = 0, minSpeedKmh = 3, targetKm = null, distMode = 'extend', recalcStep = true, trimStart = true }) {
+// ---------------------------------------------------------------- watch sensor delay
+/** channels the watch may report late (heart rate is never shifted: its lag is real physiology) */
+export const LAG_CHANNELS = [
+  { key: 'cad', label: 'cadence', also: ['fcad'] },
+  { key: 'st', label: 'stance time' },
+  { key: 'vo', label: 'vertical oscillation' },
+  { key: 'power', label: 'power' },
+];
+
+function makeValueAt(W) {
+  const ts = W.map(r => r.t);
+  return t => {
+    let lo = 0, hi = ts.length - 1;
+    if (t < ts[0]) return null;
+    while (lo < hi) { const m = (lo + hi + 1) >> 1; if (ts[m] <= t) lo = m; else hi = m - 1; }
+    return t - ts[lo] <= 2000 ? W[lo] : (lo + 1 < W.length && ts[lo + 1] - t <= 2000 ? W[lo + 1] : W[lo]);
+  };
+}
+
+/** speed-ups of ≥ 2 km/h (instant or ramped over ≤ 15 s) that then hold ≥ 25 s; returns the moment each rise starts */
+function upSteps(S) {
+  const out = [];
+  const rise = i => S[i].speed - S[i - 1].speed > 0.01;
+  for (let i = 2; i < S.length; i++) {
+    if (!rise(i) || rise(i - 1)) continue;
+    let j = i;
+    while (j + 1 < S.length && rise(j + 1) && S[j + 1].t - S[i].t <= 15000) j++;
+    if ((S[j].speed - S[i - 1].speed) * 3.6 < 2) continue;
+    const hold = S.slice(j, j + 26);
+    if (hold.length >= 26 && hold.every(x => Math.abs(x.speed - S[j].speed) * 3.6 < 0.3) && hold[hold.length - 1].t - S[j].t <= 30000) out.push(S[i].t);
+  }
+  return out;
+}
+
+/** mean normalised step response of one channel after the speed rises → seconds to 50 % */
+function responseT50(valueAt, steps, key) {
+  const curves = [];
+  for (const u of steps) {
+    const win = (a, b) => { const v = []; for (let j = a; j <= b; j++) { const r = valueAt(u + j * 1000); if (r && r[key] > 0) v.push(r[key]); } return v; };
+    const pre = mean(win(-25, -3)), post = mean(win(25, 45));
+    if (pre == null || post == null || Math.abs(post - pre) < Math.max(1e-6, Math.abs(pre) * 0.02)) continue;
+    const c = [];
+    for (let j = -5; j <= 30; j++) { const r = valueAt(u + j * 1000); c.push(r && r[key] > 0 ? (r[key] - pre) / (post - pre) : null); }
+    curves.push(c);
+  }
+  if (curves.length < 2) return null;
+  const m = curves[0].map((_, j) => mean(curves.map(c => c[j]).filter(v => v != null)));
+  for (let j = 0; j < m.length; j++) {
+    // need the response to stay up, not a one-sample blip
+    if (m[j] >= 0.5 && (m[j + 1] ?? 1) >= 0.4 && (m[j + 2] ?? 1) >= 0.4) return { t50: j - 5, n: curves.length };
+  }
+  return null;
+}
+
+/**
+ * How late does the watch report each channel? The fastest-reacting channel (usually vertical
+ * oscillation) marks when your stride really changed; slower channels are delayed by the difference.
+ */
+export function estimateSensorLags(W, S) {
+  const steps = upSteps(S);
+  if (steps.length < 2) return { lags: {}, steps: steps.length, reason: 'Not enough speed changes to measure the delay (needs 2+ clear speed-ups).' };
+  const valueAt = makeValueAt(W);
+  const t50 = {};
+  for (const ch of LAG_CHANNELS) {
+    if (W.filter(r => r[ch.key] > 0).length < W.length * 0.3) continue;
+    const r = responseT50(valueAt, steps, ch.key);
+    if (r) t50[ch.key] = r.t50;
+  }
+  const vals = Object.values(t50);
+  if (!vals.length) return { lags: {}, steps: steps.length, reason: 'No cadence or running-dynamics data to check.' };
+  const ref = vals.length > 1 ? Math.max(0, Math.min(...vals)) : 3; // ~3 s for the belt to get halfway to a new speed
+  const lags = {};
+  for (const [k, v] of Object.entries(t50)) { const lag = Math.round(v - ref); lags[k] = lag >= 2 ? Math.min(lag, 20) : 0; }
+  return { lags, t50, ref, steps: steps.length };
+}
+
+export function syncRun({ watch, source, offsetSec = 0, minSpeedKmh = 3, targetKm = null, distMode = 'extend', recalcStep = true, trimStart = true, sensorLag = 'auto', lagSource = null }) {
   const W = watch.records;
   if (!W.length) throw new Error('The watch file has no data records.');
   if (!source.samples.length) throw new Error('The speed source has no speed data.');
@@ -227,6 +303,17 @@ export function syncRun({ watch, source, offsetSec = 0, minSpeedKmh = 3, targetK
   const firstIdx = W.findIndex(r => r.t >= tStart);
   if (firstIdx < 0 || W[firstIdx].t >= srcEnd) throw new Error('The watch recording and the speed data don’t overlap — check the time alignment.');
 
+  // watch sensor delay: measure (or take the given value) and read those channels that many seconds later
+  let lagInfo = { lags: {}, mode: 'off' };
+  if (sensorLag === 'auto') {
+    // measure against the speed as commanded (before any belt-ramp model), shifted like the source
+    const LS = lagSource ? lagSource.samples.map(x => ({ t: x.t + offsetSec * 1000, speed: x.speed })) : S;
+    lagInfo = { ...estimateSensorLags(W, LS), mode: 'auto' };
+  }
+  else if (typeof sensorLag === 'number' && sensorLag > 0) lagInfo = { lags: { cad: sensorLag, st: sensorLag }, mode: 'manual' };
+  const lagKeys = Object.entries(lagInfo.lags || {}).filter(([, v]) => v > 0);
+  const valueAt = lagKeys.length ? makeValueAt(W) : null;
+
   const out = [];
   let d = 0, prev = null, held = 0;
   for (let i = firstIdx; i < W.length; i++) {
@@ -241,6 +328,14 @@ export function syncRun({ watch, source, offsetSec = 0, minSpeedKmh = 3, targetK
     if (prev) d += prev.inSrc && inSrc ? L.integ(prev.t, r.t) : prev.speed * (r.t - prev.t) / 1000;
     const o = { t: r.t, speed: v, dist: d, inSrc, held: !inSrc, synthetic: false, srcIndex: i };
     for (const k of CARRY) o[k] = r[k] ?? null;
+    if (lagKeys.length) {
+      for (const [k, lag] of lagKeys) {
+        const later = valueAt(r.t + lag * 1000) || W[W.length - 1];
+        o[k] = later[k] ?? null;
+        if (k === 'cad') o.fcad = later.fcad ?? null;
+      }
+      o.lagShifted = true;
+    }
     out.push(o);
     prev = o;
   }
@@ -300,8 +395,9 @@ export function syncRun({ watch, source, offsetSec = 0, minSpeedKmh = 3, targetK
       droppedEnd: W.length - 1 - lastReal,
       held, appended, truncated, scale, rawDist, finalDist: out[out.length - 1].dist,
       sourceEndedEarly: srcEnd < W[W.length - 1].t,
+      sensor: lagInfo,
     },
-    opts: { offsetSec, minSpeedKmh, targetKm, distMode, recalcStep },
+    opts: { offsetSec, minSpeedKmh, targetKm, distMode, recalcStep, sensorLag },
   };
 }
 
@@ -602,3 +698,99 @@ export function planFromDetection(det) {
 }
 
 export { TYPE_NAMES };
+
+// ---------------------------------------------------------------- treadmill belt ramp
+/** QZ logs the speed it sets; the belt takes time to get there. Limit changes to `rate` km/h per second. */
+export function rampSource(source, rateKmhPerSec) {
+  if (!(rateKmhPerSec > 0)) return source;
+  const r = rateKmhPerSec / 3.6;
+  const out = [];
+  let v = null;
+  for (const s of source.samples) {
+    if (v == null) v = s.speed;
+    else {
+      const dt = (s.t - out[out.length - 1].t) / 1000;
+      const max = r * Math.max(dt, 0.2);
+      v = s.speed > v ? Math.min(s.speed, v + max) : Math.max(s.speed, v - max);
+    }
+    out.push({ t: s.t, speed: v });
+  }
+  return { ...source, samples: out, ramp: rateKmhPerSec };
+}
+
+// ---------------------------------------------------------------- re-analysis
+/**
+ * Check an (edited) lap layout against the synced data: workout type from the laps themselves,
+ * lap boundaries vs treadmill speed changes, laps mixing two speeds, consistency per kind, sensor sync.
+ */
+export function analyzeWorkout(records, laps, { target = null, sensor = null } = {}) {
+  const n = records.length;
+  // speed changes (≥ 0.5 km/h) in the synced speed
+  const ch = [];
+  for (let i = 1; i < n; i++) if (Math.abs(records[i].speed - records[i - 1].speed) * 3.6 >= 0.5) {
+    if (!ch.length || records[i].t - ch[ch.length - 1].t > 5000) ch.push({ t: records[i].t, i, from: records[i - 1].speed, to: records[i].speed });
+    else ch[ch.length - 1] = { ...ch[ch.length - 1], to: records[i].speed }; // ramp: same change
+  }
+  const big = ch.filter(c => Math.abs(c.to - c.from) * 3.6 >= 1);
+  // lap boundaries vs changes
+  const boundaries = laps.slice(1).map((l, k) => {
+    let best = null;
+    for (const c of big) if (best == null || Math.abs(c.t - l.start) < Math.abs(best.t - l.start)) best = c;
+    const off = best ? (l.start - best.t) / 1000 : null;
+    return { lap: k + 1, name: l.name, t: l.start, off: best && Math.abs(off) <= 30 ? off : null };
+  });
+  const onChange = boundaries.filter(b => b.off != null && Math.abs(b.off) <= 1).length;
+  const nearChange = boundaries.filter(b => b.off != null && Math.abs(b.off) > 1 && Math.abs(b.off) <= 15);
+  const noChange = boundaries.filter(b => b.off == null || Math.abs(b.off) > 15);
+  // speed changes that fall inside a lap (not near its edges)
+  const inside = big.filter(c => laps.every(l => Math.abs(l.start - c.t) > 15000) && c.t > records[0].t + 15000)
+    .map(c => ({ ...c, lap: laps.findIndex(l => c.t >= l.start && c.t < (l.end || Infinity)) }));
+  // laps mixing speeds: share of time away from the lap's main speed
+  const mixed = [];
+  for (const [k, l] of laps.entries()) {
+    const cnt = new Map();
+    for (let i = l.i0; i < l.i1; i++) { const key = Math.round(records[i].speed * 36) / 10; cnt.set(key, (cnt.get(key) || 0) + 1); }
+    const total = l.i1 - l.i0; let main = null, mc = 0;
+    for (const [sp, c] of cnt) if (c > mc) { main = sp; mc = c; }
+    const away = total - mc;
+    // ignore steady laps that simply contain slow drift (km splits of a progression etc.)
+    const spread = Math.max(...cnt.keys()) - Math.min(...cnt.keys());
+    if (away >= 2 && spread >= 1 && away / total < 0.5) mixed.push({ lap: k, name: l.name, away, main });
+  }
+  // consistency per lap kind
+  const kinds = {};
+  for (const [k, l] of laps.entries()) {
+    if (k === laps.length - 1 && laps.length > 1) continue;
+    (kinds[l.type] ||= []).push(l);
+  }
+  const consistency = Object.entries(kinds).filter(([, ls]) => ls.length > 1).map(([type, ls]) => ({
+    type, count: ls.length,
+    dur: [Math.min(...ls.map(l => l.duration)), Math.max(...ls.map(l => l.duration))],
+    dist: [Math.min(...ls.map(l => l.distance)), Math.max(...ls.map(l => l.distance))],
+    pace: [Math.max(...ls.map(l => l.avgSpeed)), Math.min(...ls.map(l => l.avgSpeed))],
+  }));
+  // workout type from the laps as they now are
+  const segs = laps.map(l => ({ i0: l.i0, i1: l.i1, t0: l.start, dur: l.duration, dist: l.distance, speed: l.avgSpeed }));
+  const cls = classifyRun(segs);
+  // cadence vs speed sync check after any delay correction
+  let cadence = null;
+  if (records.filter(r => r.cad > 0).length > n * 0.5) {
+    const S = records.map(r => ({ t: r.t, speed: r.speed }));
+    const steps = upSteps(S);
+    const r = steps.length >= 2 ? responseT50(makeValueAt(records), steps, 'cad') : null;
+    const v = steps.length >= 2 ? responseT50(makeValueAt(records), steps, 'vo') : null;
+    cadence = { t50: r?.t50 ?? null, voT50: v?.t50 ?? null, steps: steps.length };
+  }
+  // step length that can't be right (usually the seconds around a speed change)
+  let badSteps = null;
+  if (records.some(r => r.sl > 0)) badSteps = records.filter(r => r.sl > 0 && r.cad > 0 && r.speed > 1.2 && (r.sl < 450 || r.sl > 1700)).length;
+  const total = records[n - 1].dist;
+  const issues = nearChange.length + noChange.filter(b => big.length).length + inside.length + mixed.length;
+  return {
+    label: cls.label, type: cls.type,
+    boundaries, onChange, nearChange, noChange, inside, mixed, consistency, cadence,
+    changes: big.length, distance: total, target, sensor, badSteps,
+    distanceOk: target ? Math.abs(total - target) < 0.5 : null,
+    issues,
+  };
+}

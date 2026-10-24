@@ -47,9 +47,19 @@ function recordMsg(r, recalc) {
     if (r.st != null) set(m, 41, r.st);
     if (r.vr != null) set(m, 83, r.vr);
     if (r.sl != null) set(m, 85, r.sl);
-  } else if (recalc && r.slChanged) {
-    set(m, 85, r.sl);
-    if (r.vr != null && (has(m, 83) || has(m, 39))) set(m, 83, r.vr);
+  } else {
+    if (r.lagShifted) {
+      // watch sensor delay corrected: write the re-timed cadence / dynamics into the original fields
+      if (has(m, 4)) set(m, 4, r.cad != null ? Math.floor(r.cad) : null);
+      if (has(m, 52)) set(m, 52, r.cad != null ? r.cad + (r.fcad || 0) : null);
+      if (has(m, 53)) set(m, 53, r.cad != null ? (r.fcad || 0) : null);
+      if (has(m, 41)) set(m, 41, r.st);
+      if (has(m, 39)) set(m, 39, r.vo);
+    }
+    if (recalc && r.slChanged) {
+      set(m, 85, r.sl);
+      if (r.vr != null && (has(m, 83) || has(m, 39))) set(m, 83, r.vr);
+    }
   }
   return m;
 }

@@ -136,7 +136,8 @@ export function shiftSet(bounds, endT, sec) {
 /** snap each boundary to the nearest speed change (≥ 0.3 km/h) within ±win seconds */
 export function snapToChanges(bounds, recs, win = 12) {
   const ch = [];
-  for (let i = 1; i < recs.length; i++) if (Math.abs(recs[i].speed - recs[i - 1].speed) * 3.6 >= 0.3) ch.push(recs[i].t);
+  const step = i => Math.abs(recs[i].speed - recs[i - 1].speed) * 3.6 >= 0.3;
+  for (let i = 1; i < recs.length; i++) if (step(i) && !(i > 1 && step(i - 1))) ch.push(recs[i].t); // start of each change (a belt ramp counts once)
   if (!ch.length) return { bounds, moved: 0 };
   let moved = 0;
   const out = bounds.map((b, k) => {
@@ -147,4 +148,72 @@ export function snapToChanges(bounds, recs, win = 12) {
     return b;
   }).filter((b, k, a) => k === 0 || b.t > a[k - 1].t);
   return { bounds: out, moved };
+}
+
+// ---------------------------------------------------------------- distance-based editing
+/** distance at the first record at/after t */
+export function distAt(recs, t) {
+  let lo = 0, hi = recs.length - 1;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (recs[m].t < t) lo = m + 1; else hi = m; }
+  return recs[lo].dist;
+}
+/** time of the first record whose distance reaches d (whole seconds, as stored) */
+export function timeAtDist(recs, d) {
+  let lo = 0, hi = recs.length - 1;
+  if (recs[hi].dist < d - 1e-6) return recs[hi].t;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (recs[m].dist < d - 1e-6) lo = m + 1; else hi = m; }
+  // pick whichever neighbouring second is closer to the exact distance
+  if (lo > 0 && Math.abs(recs[lo - 1].dist - d) < Math.abs(recs[lo].dist - d)) return recs[lo - 1].t;
+  return recs[lo].t;
+}
+export function lapDistances(bounds, recs) {
+  const end = recs[recs.length - 1];
+  return bounds.map((b, k) => (k + 1 < bounds.length ? distAt(recs, bounds[k + 1].t) : end.dist) - distAt(recs, b.t));
+}
+/** like relayout(), but lengths are metres measured along the synced treadmill distance */
+export function relayoutDist(bounds, lens, recs) {
+  const end = recs[recs.length - 1].t;
+  const cur = lapDistances(bounds, recs);
+  const out = [];
+  let t = bounds[0].t;
+  for (let k = 0; k < bounds.length; k++) {
+    if (k > 0 && t > end - 1000) break;
+    out.push({ ...bounds[k], t });
+    const len = lens[k] ?? cur[k];
+    let nt = timeAtDist(recs, distAt(recs, t) + Math.max(1, len));
+    if (nt <= t) nt = t + 1000;
+    t = nt;
+  }
+  return out;
+}
+export function setGroupDistance(bounds, recs, type, m) {
+  const last = bounds.length - 1;
+  return relayoutDist(bounds, bounds.map((b, k) => (b.type === type && k !== last ? m : null)), recs);
+}
+export function setGroupDistances(bounds, recs, map) {
+  const last = bounds.length - 1;
+  return relayoutDist(bounds, bounds.map((b, k) => (k !== last && map[b.type] > 0 ? map[b.type] : null)), recs);
+}
+export function groupDistStats(bounds, recs, type) {
+  const d = lapDistances(bounds, recs).filter((_, k) => k !== bounds.length - 1 && bounds[k].type === type);
+  if (!d.length) return null;
+  return { min: Math.min(...d), max: Math.max(...d), med: median(d) };
+}
+/** move the end of lap k so it covers m metres */
+export function setLapDistance(bounds, recs, k, m) {
+  if (k + 1 >= bounds.length) return bounds;
+  const end = recs[recs.length - 1].t;
+  const lo = bounds[k].t + 1000, hi = (k + 2 < bounds.length ? bounds[k + 2].t : end) - 1000;
+  const t = Math.min(hi, Math.max(lo, timeAtDist(recs, distAt(recs, bounds[k].t) + m)));
+  return bounds.map((b, j) => (j === k + 1 ? { ...b, t } : b));
+}
+
+/** "0.73", "0.73 km", "730 m", "730" → metres */
+export function parseDistInput(str) {
+  const s = String(str || '').trim().toLowerCase().replace(',', '.');
+  const n = parseFloat(s);
+  if (!Number.isFinite(n) || n <= 0) return NaN;
+  if (/km/.test(s)) return n * 1000;
+  if (/m\b|m$/.test(s)) return n;
+  return n > 50 ? n : n * 1000;
 }
