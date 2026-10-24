@@ -6,9 +6,9 @@ import {
 } from './engine.js';
 import { buildFit, DEVICES, resolveDevice } from './export.js';
 import { TEMPLATES, STEP_TYPES, clonePlan, flattenPlan, planRecords, step, repeat, uid, withIds, stepDur, typeLabel } from './plan.js';
-import { lapGroups, setGroupDuration, setGroupName, setGroupType, intervalShape, setRepCount, shiftSet, snapToChanges, durations } from './laps.js';
+import { lapGroups, setGroupDuration, setGroupDurations, groupRange, setGroupName, setGroupType, intervalShape, setRepCount, shiftSet, snapToChanges, durations } from './laps.js';
 
-export const VERSION = '2.0';
+export const VERSION = '3.0';
 const DESK = document.body.dataset.layout === 'desktop';
 
 // ------------------------------------------------------------------ utils
@@ -322,20 +322,31 @@ function setEditor(r) {
   const shape = intervalShape(bounds);
   const durs = durations(bounds, end);
   const typeOpts = t => STEP_TYPES.map(o => `<option value="${o.id}"${o.id === t ? ' selected' : ''}>${o.label}</option>`).join('');
-  const rows = groups.map(g => `<div class="se-row t-${g.type}">
+  const uneven = groups.filter(g => g.editable && !g.uniform);
+  const rows = groups.map(g => {
+    const rg = groupRange(bounds, end, g.type);
+    const n = g.idx.filter(k => k !== bounds.length - 1).length;
+    const status = g.lastOnly ? 'runs to the end of the recording'
+      : g.uniform ? `<span class="ok">✓ ${n > 1 ? `all ${n} exactly` : 'exactly'} ${fmtDur(rg[0])}</span>`
+      : `<span class="warn">now ${fmtDur(rg[0])}–${fmtDur(rg[1])} — Apply makes all ${n} the same</span>`;
+    return `<div class="se-row t-${g.type}">
       <div class="se-name"><span class="dot"></span><b>${GROUP_LABEL[g.type] || typeLabel(g.type)}</b><span class="muted"> × ${g.count}</span></div>
-      <label class="se-f"><span>Each lasts</span>${g.lastOnly
+      <div class="se-f se-len"><span>Each lasts</span>${g.lastOnly
         ? `<input class="inp sm num" value="to the end" disabled>`
-        : `<input class="inp sm num" id="se-dur-${g.type}" data-ch="se-dur" data-type="${g.type}" value="${fmtDur(g.dur)}" autocomplete="off">`}
-        ${!g.uniform ? `<em class="mixed" title="Laps of this kind have different lengths; typing here makes them all equal">mixed</em>` : ''}</label>
+        : `<div class="se-lenrow"><input class="inp sm num" id="se-dur-${g.type}" data-ch="se-dur" data-type="${g.type}" value="${fmtDur(g.dur)}" autocomplete="off" aria-label="Length of every ${esc(GROUP_LABEL[g.type] || g.type)} lap"><button class="btn sm ${g.uniform ? '' : 'primary'}" data-act="se-apply" data-type="${g.type}">Apply</button></div>`}
+        <div class="se-status">${status}</div></div>
       <label class="se-f"><span>Name</span><input class="inp sm" id="se-name-${g.type}" data-ch="se-name" data-type="${g.type}" value="${esc(g.pattern)}" placeholder="${g.count > 1 ? 'e.g. Rep #' : 'Name'}" autocomplete="off"></label>
       <label class="se-f"><span>Type</span><select class="inp sm" data-ch="se-type" data-type="${g.type}">${typeOpts(g.type)}</select></label>
-    </div>`).join('');
+    </div>`;
+  }).join('');
   const med = ks => { const v = ks.map(k => durs[k]).sort((a, b) => a - b); return v[v.length >> 1]; };
   const repTxt = shape ? `${shape.reps.length} × ${fmtDur(med(shape.reps))}${shape.recs.length ? ` / ${fmtDur(med(shape.recs))}` : ''}` : '';
+  const exactLbl = groups.filter(g => g.editable).map(g => fmtDur(g.dur)).join(' / ');
   return `<div class="seteditor">
     <div class="se-head"><div><b>Edit as a set</b> <span class="small muted">— one box changes every lap of that kind</span></div>
       ${shape ? `<label class="se-count">Reps <input class="inp sm num" id="se-count" data-ch="se-count" value="${shape.reps.length}" autocomplete="off"><span class="small muted">${repTxt}</span></label>` : ''}</div>
+    ${uneven.length ? `<div class="se-exact"><div><b>Some laps are a second or two off</b> (${uneven.map(g => (GROUP_LABEL[g.type] || g.type).toLowerCase()).join(', ')}). Make every lap exactly the length in its box — later laps shift to follow.</div>
+      <button class="btn primary" data-act="se-exact">Make all exact · ${exactLbl}</button></div>` : ''}
     ${rows}
     <div class="row se-tools">
       <span class="small muted">Move all boundaries</span>
@@ -343,7 +354,7 @@ function setEditor(r) {
       <button class="btn sm" data-act="se-snap" title="Move each lap boundary onto the nearest speed change (±12 s)">Snap to speed changes</button>
       <button class="btn sm ghost" data-act="lap-reset">Reset to auto-detected</button>
     </div>
-    <div class="small muted">Changing a length moves the laps after it; the last lap (usually the cool down) takes up the difference. Use “#” in a name for the lap number, e.g. “Rep #”. Fine-tune single laps in the table below.</div>
+    <div class="small muted">Laps are laid end to end from the start of the warm up, so every rep and recovery gets exactly its length and the ones after it shift along; the last lap (usually the cool down) takes up the difference. Type a length and press Enter or Apply. Use “#” in a name for the lap number, e.g. “Rep #”. Fine-tune single laps in the table below.</div>
   </div>`;
 }
 
@@ -539,7 +550,7 @@ function viewHelp() {
     <li><b>Step length:</b> the watch guesses step length from its own (wrong) pace. With this on, step length and vertical ratio are recalculated from treadmill speed ÷ cadence.</li></ul>
     <h3>4 · Laps</h3>
     <p>RunSync reads the speed profile to work out the session: <b>intervals</b> (warm up · reps · recoveries · cool down), <b>pyramid</b>, <b>fartlek</b>, <b>progression</b>, <b>tempo</b> or an <b>easy / long run</b> (1 km splits). You can switch to N km splits, the watch’s own laps or one lap.</p>
-    <p>Tap <b>Edit laps</b> to change them. <b>Edit as a set</b> changes every lap of one kind at once: type one length for the reps and all 10 reps get it, and later laps move along. You can also change the number of reps, rename them all (“Rep #” numbers them), change their type, shift every boundary by ±1 s, or <b>snap</b> boundaries onto the treadmill’s speed changes. The table underneath still edits one lap at a time.</p>
+    <p>Tap <b>Edit laps</b> to change them. <b>Edit as a set</b> changes every lap of one kind at once: type one length for the reps and all 10 reps get it, and later laps move along. If detection gave some laps 2:59 / 1:01 or 3:01 / 0:59, tap <b>Make all exact</b> (or Apply / Enter on a box) and every rep and recovery gets exactly its length, with the laps after it shifting to follow. You can also change the number of reps, rename them all (“Rep #” numbers them), change their type, shift every boundary by ±1 s, or <b>snap</b> boundaries onto the treadmill’s speed changes. The table underneath still edits one lap at a time.</p>
     <h3>5 · Export</h3>
     <p>FIT is the best option for Strava, Garmin Connect, Intervals.icu, Runalyze and TrainingPeaks. Choose which device the file says it came from (default Amazfit T-Rex 3). On a phone, <b>Share FIT</b> sends it straight to another app.</p>
     <h3>Desktop version</h3>
@@ -672,6 +683,12 @@ function ensureCustom() {
   if (!S.custom || S.lapMode !== 'custom') { S.custom = S.result.laps.map(l => ({ t: l.start, type: l.type, name: l.name, trigger: l.trigger })); S.lapMode = 'custom'; }
 }
 const endT = () => S.result.records[S.result.records.length - 1].t;
+function applyGroupDur(type, value) {
+  const sec = parseDurInput(value);
+  if (!(sec > 0)) { toast('Type a length like 3:00 (or 3 for three minutes)'); return render(); }
+  ensureCustom();
+  setCustom(setGroupDuration(S.custom, endT(), type, sec));
+}
 function setCustom(nb, what) {
   const before = S.custom.length;
   S.custom = nb; recompute();
@@ -679,6 +696,19 @@ function setCustom(nb, what) {
 }
 
 const clickHandlers = {
+  'se-apply': el => { const inp = document.getElementById(`se-dur-${el.dataset.type}`); if (inp) applyGroupDur(el.dataset.type, inp.value); },
+  'se-exact': () => {
+    ensureCustom();
+    const map = {};
+    for (const g of lapGroups(S.custom, endT())) {
+      if (!g.editable) continue;
+      const inp = document.getElementById(`se-dur-${g.type}`);
+      const v = inp ? parseDurInput(inp.value) : g.dur;
+      map[g.type] = v > 0 ? v : g.dur;
+    }
+    setCustom(setGroupDurations(S.custom, endT(), map));
+    toast(`Every lap set exactly: ${Object.entries(map).map(([t, v]) => `${(GROUP_LABEL[t] || t).toLowerCase()} ${fmtDur(v)}`).join(', ')}`);
+  },
   'se-shift': el => { ensureCustom(); setCustom(shiftSet(S.custom, endT(), +el.dataset.v)); },
   'se-snap': () => { ensureCustom(); const r = snapToChanges(S.custom, S.result.records); setCustom(r.bounds); toast(r.moved ? `Moved ${r.moved} lap boundar${r.moved === 1 ? 'y' : 'ies'} onto speed changes` : 'Laps already sit on the speed changes'); },
   'open-desktop': () => { location.href = 'desktop.html'; },
@@ -759,7 +789,7 @@ const clickHandlers = {
 };
 
 const changeHandlers = {
-  'se-dur': el => { const sec = parseDurInput(el.value); if (!(sec > 0)) return render(); ensureCustom(); setCustom(setGroupDuration(S.custom, endT(), el.dataset.type, sec)); },
+  'se-dur': el => applyGroupDur(el.dataset.type, el.value),
   'se-name': el => { ensureCustom(); setCustom(setGroupName(S.custom, el.dataset.type, el.value.trim())); },
   'se-type': el => { ensureCustom(); setCustom(setGroupType(S.custom, el.dataset.type, el.value)); },
   'se-count': el => { const n = parseInt(el.value, 10); if (!(n >= 1 && n <= 60)) return render(); ensureCustom(); setCustom(setRepCount(S.custom, endT(), n), 'count'); },
@@ -815,6 +845,8 @@ document.addEventListener('click', e => {
 });
 document.addEventListener('keydown', e => {
   if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('.tile[data-act="pick"]')) { e.preventDefault(); e.target.click(); return; }
+  if (e.key === 'Enter' && e.target.matches?.('input[data-ch="se-dur"]')) { e.preventDefault(); const t = e.target; applyGroupDur(t.dataset.type, t.value); return; }
+  if (e.key === 'Enter' && e.target.matches?.('input[data-ch="se-count"]')) { e.preventDefault(); changeHandlers['se-count'](e.target); return; }
   if (e.key === 'Enter' && e.target.matches?.('input[data-ch]')) { e.target.blur(); return; }
   if (e.target.matches?.('input, select, textarea')) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { if (S.result) { e.preventDefault(); clickHandlers.export({ dataset: { fmt: 'fit' } }); } return; }

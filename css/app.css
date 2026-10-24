@@ -302,3 +302,19 @@ body[data-layout="desktop"] table.laps tbody tr:hover td { background: var(--car
   .se-f .mixed { display: none; }
 }
 .dsk-plan .sticky { max-height: calc(100vh - 82px); overflow: auto; scrollbar-width: thin; }
+
+/* ---------- v3: exact set lengths ---------- */
+.se-lenrow { display: flex; gap: 6px; }
+.se-lenrow .inp { flex: 1; min-width: 0; }
+.se-status { font-size: 11.5px; margin-top: 3px; color: var(--ink-3); line-height: 1.3; }
+.se-status .ok { color: var(--ok); font-weight: 600; }
+.se-status .warn { color: var(--warn); font-weight: 600; }
+.se-exact { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; background: var(--card); border: 1px dashed var(--warn); border-radius: 10px; padding: 10px 12px; font-size: 13.5px; }
+.se-exact > div { flex: 1 1 260px; color: var(--ink-2); }
+.se-row { align-items: start; }
+.se-name { padding-top: 20px; padding-bottom: 0; }
+@media (max-width: 560px) {
+  .se-row { grid-template-columns: 1fr 1fr; }
+  .se-len { grid-column: 1 / -1; }
+  .se-name { padding-top: 0; }
+}

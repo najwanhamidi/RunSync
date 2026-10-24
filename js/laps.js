@@ -60,6 +60,19 @@ export function setGroupDuration(bounds, endT, type, sec) {
   return relayout(bounds, durs, endT);
 }
 
+/** apply several kind → seconds lengths in one pass, e.g. { active: 180, rest: 60 } */
+export function setGroupDurations(bounds, endT, map) {
+  const last = bounds.length - 1;
+  const durs = bounds.map((b, k) => (k !== last && map[b.type] > 0 ? map[b.type] : null));
+  return relayout(bounds, durs, endT);
+}
+
+/** min / max length of each kind (final lap excluded) */
+export function groupRange(bounds, endT, type) {
+  const d = durations(bounds, endT).filter((_, k) => k !== bounds.length - 1 && bounds[k].type === type);
+  return d.length ? [Math.min(...d), Math.max(...d)] : null;
+}
+
 export function setGroupName(bounds, type, pattern) {
   let i = 0;
   const n = bounds.filter(b => b.type === type).length;

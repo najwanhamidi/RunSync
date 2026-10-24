@@ -11,7 +11,7 @@ that exports FIT, TCX or GPX.
 **Live app:** https://najwanhamidi.github.io/RunSync/ (phone; add it to your home screen to install it)
 **Desktop version:** https://najwanhamidi.github.io/RunSync/desktop.html (two-pane layout, keyboard shortcuts; installs as a desktop app from Chrome or Edge)
 
-v1 is preserved on the [`backup-v1`](../../tree/backup-v1) branch.
+Earlier versions are kept on the [`backup-v1`](../../tree/backup-v1) and [`backup-v2`](../../tree/backup-v2) branches.
 
 Everything runs in the browser. Files are never uploaded.
 
@@ -25,7 +25,7 @@ Everything runs in the browser. Files are never uploaded.
 | **Actual distance** | Enter the real distance. If the data is short, seconds are added at the end at the last speed, with HR and cadence carried over from the final real seconds. Nothing earlier changes. If the data is long, the end is cut where the distance is reached. You can also choose to scale all speeds proportionally. |
 | **Step length** | Optionally recalculates step length and vertical ratio from treadmill speed ÷ cadence. The watch's own figures come from its inaccurate pace. |
 | **Run type & laps** | Detects intervals (warm up / reps / recoveries / cool down), pyramid, fartlek, progression, tempo, and easy or long runs (1 km splits). Laps can also be every N km, the watch's own laps, or one lap. You can edit them: change type, rename, change a lap's length, split, merge. |
-| **Edit as a set** | When a structured workout is detected, one box changes every lap of a kind: all rep lengths, all recovery lengths, the number of reps, names (`Rep #`) and types. Later laps move along and the cool down takes up the difference. You can also shift every boundary ±1 s or snap boundaries onto the treadmill's speed changes. Single-lap editing is still in the table. |
+| **Edit as a set** | When a structured workout is detected, one box changes every lap of a kind. **Make all exact** fixes detection jitter (2:59 / 1:01, 3:01 / 0:59…) so every rep and recovery is exactly 3:00 / 1:00 and later laps shift to follow. It covers all rep lengths, all recovery lengths, the number of reps, names (`Rep #`) and types. Later laps move along and the cool down takes up the difference. You can also shift every boundary ±1 s or snap boundaries onto the treadmill's speed changes. Single-lap editing is still in the table. |
 | **Desktop** | `desktop.html`: settings on the left, results on the right, laps and km splits side by side, a chart read-out on hover, and drop both files anywhere (it works out which is which). Shortcuts: ←/→ nudge the alignment (Shift = 10 s), E edits laps, Ctrl/⌘+S saves the FIT, 1/2/3 switch tabs. |
 | **Planner** | Build workouts without any files: steps by time, distance or "until end", nested repeat blocks, speed or pace input, totals, a profile chart, and lap and km split tables. Save plans, use templates, import/export JSON, or use a plan as the speed source for a watch-only sync. |
 | **Export** | **FIT**: a lossless edit of the watch FIT that keeps every original message and developer field. You also get **TCX**, **GPX** (a virtual straight track, since a treadmill run has no GPS), per-second **CSV** and **laps CSV**. You can choose which device the file reports (default Amazfit T-Rex 3; Garmin models and others are available). |

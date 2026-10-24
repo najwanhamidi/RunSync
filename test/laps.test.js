@@ -55,3 +55,28 @@ assert.ok(nb.at(-1).t < end);
 const laps = buildLaps(recs, nb);
 assert.equal(laps.at(-1).end, end);
 console.log('laps.test: all good');
+
+// jittered detection (2:59 / 1:01 / 3:01 / 0:59) → exact 3:00 / 1:00 everywhere, laps shift to follow
+{
+  const { setGroupDurations, groupRange } = await import('../js/laps.js');
+  const jit = [0, -1, 1, 0, 1, -1, 0, 1, -1, 0];
+  const t0 = 1e12, wu = 720;
+  const jb = [{ t: t0, type: 'warmup', name: 'Warm up' }];
+  let t = t0 + wu * 1000;
+  for (let i = 0; i < 10; i++) {
+    jb.push({ t, type: 'active', name: `Rep ${i + 1}` }); t += (180 + jit[i]) * 1000;
+    jb.push({ t, type: 'rest', name: `Recovery ${i + 1}` }); t += (60 - jit[i]) * 1000;
+  }
+  jb.push({ t, type: 'cooldown', name: 'Cool down' });
+  const jEnd = t + 600e3;
+  assert.deepEqual(groupRange(jb, jEnd, 'active'), [179, 181]);
+  const ex = setGroupDurations(jb, jEnd, { warmup: 720, active: 180, rest: 60 });
+  const dd = durations(ex, jEnd);
+  ex.forEach((b, k) => { if (b.type === 'active') assert.equal(dd[k], 180); if (b.type === 'rest') assert.equal(dd[k], 60); });
+  ex.filter(b => b.type === 'active').forEach((b, i) => assert.equal(b.t, t0 + (720 + i * 240) * 1000));
+  assert.equal(dd.at(-1), 600);
+  // one box at a time gives the same result
+  const one = setGroupDuration(setGroupDuration(jb, jEnd, 'active', 180), jEnd, 'rest', 60);
+  assert.deepEqual(one.map(b => b.t), ex.map(b => b.t));
+  console.log('laps.test: jitter → exact OK');
+}
